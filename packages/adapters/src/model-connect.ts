@@ -8,6 +8,7 @@ import {
   modelOutputLeavesInputRoom,
 } from "@rakazo/contracts";
 import { modelIdSupportsImages, updateModelImageCapabilities } from "./model-vision.js";
+import { normalizeOpenAiCompatibleBaseUrl } from "./openai-compatible-url.js";
 import { modelCredentialAuthKind } from "./pi-catalog-availability.js";
 import {
   CHATGPT_OAUTH_PROVIDER,
@@ -25,6 +26,22 @@ export type BuildModelConnectOptions = {
   /** Skip writing visionModelIds when prior plaintext was unavailable during key replacement. */
   omitVisionModelIds?: boolean;
 };
+
+/** Reuse a saved probe key only for the endpoint it was saved for. */
+export function storedOpenAiCompatibleProbeKey(
+  baseUrl: string,
+  storedPlaintext?: string,
+): string | undefined {
+  const previous = tryParseModelSecret(storedPlaintext);
+  if (
+    previous?.kind !== "openai_compatible" ||
+    !previous.apiKey?.trim() ||
+    previous.baseUrl !== normalizeOpenAiCompatibleBaseUrl(baseUrl)
+  ) {
+    return undefined;
+  }
+  return previous.apiKey;
+}
 
 export function buildModelConnectPlaintext(
   input: ModelConnectInput,

@@ -63,6 +63,7 @@ import {
   destroyBot,
   displayBotWorkspacePath,
   enqueueTakeoverContinuation,
+  ensureComputerWorkspaceLayout,
   expireComputerControl,
   forgetBotSecret,
   hasActiveComputerControl,
@@ -111,6 +112,7 @@ import {
   selectDefaultCredentialId,
   serializeModelSecret,
   storeBotSecret,
+  storedOpenAiCompatibleProbeKey,
   takeoverLeaseMs,
   toComputerRef,
   touchRunningComputer,
@@ -137,8 +139,9 @@ import type {
   SpaceNavigation,
 } from "@rakazo/contracts";
 import {
-  ATTACHMENT_MAX_BYTES,
   appContract,
+  attachmentMaxBytes,
+  attachmentSizeLabel,
   BotSecretAuth,
   ComputerCommandSchema,
   foldComputerCommands,
@@ -184,6 +187,7 @@ import {
   findSpaceMemoryConfig,
   findTicket,
   formatMessagingLinkCode,
+  InstructionConflictError,
   InvalidSpaceNameError,
   IsolationError,
   issueMessagingLinkCode,
@@ -583,6 +587,7 @@ export interface RouterDeps {
   billing?: BillingService;
   env: {
     ticketBoardEnabled?: boolean;
+    maxUploadSizeBytes?: number;
     agentRuntime: string;
     teamChatJudgeProvider?: string;
     teamChatJudgeModel?: string;
@@ -1289,8 +1294,53 @@ export function createRouter(deps: RouterDeps) {
       }),
       probeOpenAiCompatible: authed.models.probeOpenAiCompatible.handler(
         async ({ context, input }) => {
+          let apiKey = input.apiKey;
+          if (!apiKey?.trim()) {
+            try {
+              const preferred = await findModelCredential(
+                deps.prisma,
+                context.actor,
+                OPENAI_COMPATIBLE_PROVIDER_ID,
+              );
+              const credentials = await deps.prisma.userModelCredential.findMany({
+                where: { userId: context.actor.userId, provider: OPENAI_COMPATIBLE_PROVIDER_ID },
+                orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+              });
+              const candidates = preferred
+                ? [preferred, ...credentials.filter((credential) => credential.id !== preferred.id)]
+                : credentials;
+              const secrets = await deps.prisma.secret.findMany({
+                where: {
+                  id: { in: candidates.map((credential) => credential.secretId) },
+                  userId: context.actor.userId,
+                  spaceId: null,
+                },
+                select: { id: true, ciphertext: true },
+              });
+              const ciphertexts = new Map(secrets.map((secret) => [secret.id, secret.ciphertext]));
+              for (const credential of candidates) {
+                const ciphertext = ciphertexts.get(credential.secretId);
+                if (!ciphertext) continue;
+                try {
+                  apiKey = storedOpenAiCompatibleProbeKey(
+                    input.baseUrl,
+                    await deps.secrets.load(ciphertext, credential.secretId),
+                  );
+                  if (apiKey) break;
+                } catch {
+                  // An unreadable secret must not prevent trying the remaining credentials.
+                }
+              }
+            } catch {
+              // An unavailable saved key must not prevent a keyless probe.
+            }
+          }
           try {
-            const models = await probeOpenAiCompatibleModels(input, undefined, context.signal);
+            const models = await probeOpenAiCompatibleModels(
+              { ...input, apiKey },
+              undefined,
+              context.signal,
+            );
             return { models };
           } catch (error) {
             throw new ORPCError("BAD_REQUEST", {
@@ -1745,11 +1795,13 @@ export function createRouter(deps: RouterDeps) {
           threadId: existing.thread.id,
           botId: input.botId,
           emitBotUpdated: botProfileLabelsChanged(input),
+          expectedInstructions: input.expectedInstructions,
           data: {
             name: input.name,
             title: input.title,
             description: input.description,
             instructions: input.instructions,
+            selfUpdateInstructions: input.selfUpdateInstructions,
             notifyOnFinish: input.notifyOnFinish,
             color: input.color,
             pinned: input.pinned,
@@ -1769,11 +1821,35 @@ export function createRouter(deps: RouterDeps) {
               ? { disabledBuiltinTools: input.disabledBuiltinTools }
               : {}),
           },
+        }).catch((error) => {
+          if (!(error instanceof InstructionConflictError)) throw error;
+          throw new ORPCError("CONFLICT", { message: error.message });
         });
         const bots = await repos.listBots(context.actor);
         const bot = bots.find((b) => b.id === input.botId);
         if (!bot) throw new IsolationError();
         return bot;
+      }),
+      restoreInstructions: authed.bots.restoreInstructions.handler(async ({ context, input }) => {
+        const bot = await repos.getBot(context.actor, input.botId);
+        if (!bot.thread) throw new IsolationError();
+        try {
+          await commitBotUpdate({
+            prisma: deps.prisma,
+            notify: (threadId, seq) => deps.events.notify(threadId, seq),
+            spaceId: context.actor.spaceId,
+            threadId: bot.thread.id,
+            botId: bot.id,
+            data: {},
+            emitBotUpdated: true,
+            expectedInstructions: input.expectedInstructions,
+            instructionRestore: { versionId: input.versionId, undo: input.undo },
+          });
+        } catch (error) {
+          if (!(error instanceof InstructionConflictError)) throw error;
+          throw new ORPCError("CONFLICT", { message: error.message });
+        }
+        return (await repos.listBots(context.actor)).find((bot) => bot.id === input.botId)!;
       }),
       setComputer: authed.bots.setComputer.handler(async ({ context, input }) => {
         const bot = await repos.getBot(context.actor, input.botId);
@@ -2169,17 +2245,41 @@ export function createRouter(deps: RouterDeps) {
         if (target.kind === "bot") {
           await assertTeachingSendAllowed(deps.prisma, context.actor.spaceId, target.botId);
         }
-        return sendThreadMessage(deps, context.actor, target, input);
+        return sendThreadMessage(
+          deps,
+          context.actor,
+          target,
+          input,
+          target.kind === "bot"
+            ? (runId) => releaseComputerControl(deps, context.actor, target.botId, "done", runId)
+            : undefined,
+        );
       }),
       react: authed.threads.react.handler(async ({ context, input }) => {
         const target = await resolveThreadTarget(deps.prisma, context.actor, input);
-        const result = await reactToThreadMessage(deps, context.actor, target, input);
+        // Without a model or while teaching, the reaction is still saved; it just starts no turn.
+        const mayStartTurn =
+          !(await modelSetup(deps, context.actor)).needsModel &&
+          (target.kind !== "bot" ||
+            (await assertTeachingSendAllowed(deps.prisma, context.actor.spaceId, target.botId).then(
+              () => true,
+              () => false,
+            )));
+        const result = await reactToThreadMessage(
+          deps,
+          context.actor,
+          target,
+          { ...input, mayStartTurn },
+          target.kind === "bot"
+            ? (runId) => releaseComputerControl(deps, context.actor, target.botId, "done", runId)
+            : undefined,
+        );
         if (result.eventSeq != null) {
           await deps.events.notify(target.threadId, result.eventSeq).catch((error) => {
             getLogger().error("thread reaction realtime notification", error);
           });
         }
-        return { ok: true as const };
+        return { ok: true as const, runIds: result.runIds };
       }),
       stop: authed.threads.stop.handler(async ({ context, input }) => {
         const target = await resolveThreadTarget(deps.prisma, context.actor, input);
@@ -2484,8 +2584,19 @@ export function createRouter(deps: RouterDeps) {
         const bot = await repos.getBot(context.actor, input.botId);
         if (!bot.computer) throw new IsolationError();
         if (bot.computer.state === "running" && bot.computer.providerRef) {
-          scheduleComputerSleep(deps.jobs, bot.computer.id);
-          return computerStatus(deps, context.actor, input.botId);
+          try {
+            await ensureComputerWorkspaceLayout(
+              deps.sandbox,
+              toComputerRef(bot.computer),
+              parseComputerMode(bot.computer.scope),
+              bot.id,
+              computerContext(context.actor, bot.id, "boot"),
+            );
+            scheduleComputerSleep(deps.jobs, bot.computer.id);
+            return computerStatus(deps, context.actor, input.botId);
+          } catch (error) {
+            await clearGoneSandbox(deps, bot.computer, error);
+          }
         }
         const ctx = computerContext(context.actor, bot.id, "boot");
         const manualRunId = `boot:${randomUUID()}`;
@@ -2923,7 +3034,9 @@ export function createRouter(deps: RouterDeps) {
             data: { updatedAt: new Date() },
           });
           scheduleComputerSleep(deps.jobs, computer.id);
-          entries = await deps.sandbox.listFiles(toComputerRef(computer), storedPath, ctx);
+          const ref = toComputerRef(computer);
+          await ensureComputerWorkspaceLayout(deps.sandbox, ref, computerMode, bot.id, ctx);
+          entries = await deps.sandbox.listFiles(ref, storedPath, ctx);
         } else {
           entries = await deps.home.list(computer.homeKey, storedPath, ctx);
         }
@@ -2982,11 +3095,13 @@ export function createRouter(deps: RouterDeps) {
             toComputerRef(computer),
             storedPath,
             computerContext(context.actor, bot.id, "download"),
-            { maxBytes: ATTACHMENT_MAX_BYTES },
+            { maxBytes: attachmentMaxBytes(deps.env) },
           )
           .catch((error: unknown) => {
             if (error instanceof Error && /exceeds|too large/i.test(error.message)) {
-              throw new ORPCError("BAD_REQUEST", { message: "File is too large to download." });
+              throw new ORPCError("BAD_REQUEST", {
+                message: `File exceeds the ${attachmentSizeLabel(attachmentMaxBytes(deps.env))} download limit.`,
+              });
             }
             throw error;
           });
@@ -3005,9 +3120,17 @@ export function createRouter(deps: RouterDeps) {
         if (!hasActiveComputerControl(computer) || computer.controlBotId !== bot.id) {
           throw new ORPCError("FORBIDDEN", { message: "Take control first." });
         }
+        const maxBytes = attachmentMaxBytes(deps.env);
+        if (input.contentBase64.length > Math.ceil(maxBytes / 3) * 4) {
+          throw new ORPCError("BAD_REQUEST", {
+            message: `File exceeds the ${attachmentSizeLabel(maxBytes)} upload limit.`,
+          });
+        }
         const content = Buffer.from(input.contentBase64, "base64");
-        if (content.byteLength > ATTACHMENT_MAX_BYTES) {
-          throw new ORPCError("BAD_REQUEST", { message: "File is too large to upload." });
+        if (content.byteLength > maxBytes) {
+          throw new ORPCError("BAD_REQUEST", {
+            message: `File exceeds the ${attachmentSizeLabel(maxBytes)} upload limit.`,
+          });
         }
         await keepComputerAwake(deps, computer.id);
         let storedPath: string;
@@ -3159,6 +3282,10 @@ export function createRouter(deps: RouterDeps) {
               homeKey: bot.computer.homeKey,
               providerRef: bot.computer.providerRef,
               kind: bot.computer.kind,
+              runningSince: bot.computer.runningSince,
+              controlHolder: bot.computer.controlHolder,
+              controlLeaseId: bot.computer.controlLeaseId,
+              controlLeaseExpiresAt: bot.computer.controlLeaseExpiresAt,
             },
           ).catch(() => undefined);
         }
@@ -5832,7 +5959,11 @@ export function createRouter(deps: RouterDeps) {
           : (await groupRepos.getGroupTarget(context.actor, input.groupId!)).members[0]?.bot.id;
         if (!botId) throw new IsolationError();
         try {
-          return await createOwnedArtifact(deps, context.actor, { ...input, botId });
+          return await createOwnedArtifact(
+            { ...deps, maxUploadSizeBytes: attachmentMaxBytes(deps.env) },
+            context.actor,
+            { ...input, botId },
+          );
         } catch (error) {
           if (error instanceof AttachmentValidationError) {
             throw new ORPCError("BAD_REQUEST", { message: error.message });
@@ -6311,6 +6442,7 @@ async function meDto(deps: RouterDeps, actor: Actor): Promise<Me> {
   ]);
   return {
     ticketBoardEnabled: deps.env.ticketBoardEnabled === true,
+    maxUploadSizeBytes: attachmentMaxBytes(deps.env),
     userId: actor.userId,
     email: user.email,
     name: user.name,
@@ -6333,7 +6465,7 @@ async function meDto(deps: RouterDeps, actor: Actor): Promise<Me> {
     computerHost: computerHostFor(setup.settings?.computerHost, deps.env.sandboxProvider),
     canChooseHostComputer: actor.isDeploymentOwner && deps.env.sandboxProvider === "docker",
     sandboxProvider: deps.env.sandboxProvider,
-    avatarStyle: user.avatarStyle === "organic" ? "organic" : "robot",
+    avatarStyle: user.avatarStyle === "robot" ? "robot" : "organic",
     billingEnabled: Boolean(deps.billing) && !actor.isDeploymentOwner,
   };
 }
@@ -6427,12 +6559,41 @@ async function releaseComputerControl(
   actor: Actor,
   botId: string,
   reason?: ComputerReleaseReason,
+  expectedRunId?: string,
 ): Promise<void> {
-  const bot = await createRepos(deps.prisma).getBot(actor, botId);
-  if (!bot.computer) throw new IsolationError();
+  let bot = await createRepos(deps.prisma).getBot(actor, botId);
+  if (!bot.computer) {
+    if (expectedRunId !== undefined) return;
+    throw new IsolationError();
+  }
+  const unopenedTakeover =
+    expectedRunId !== undefined &&
+    bot.computer.controlHolder === "none" &&
+    bot.computer.controlBotId === null &&
+    bot.computer.controlLeaseId === null &&
+    bot.computer.controlRunId === expectedRunId;
+  if (unopenedTakeover) {
+    const released = await deps.events.finalizeComputerControlRelease({
+      spaceId: actor.spaceId,
+      computerId: bot.computer.id,
+      botId: bot.id,
+      runId: expectedRunId,
+      leaseId: null,
+      holder: "bot",
+      reason: reason ?? "released",
+    });
+    if (released) {
+      await enqueueTakeoverContinuation(deps.jobs, released.runId);
+      scheduleComputerSleep(deps.jobs, bot.computer.id);
+      return;
+    }
+    bot = await createRepos(deps.prisma).getBot(actor, botId);
+    if (!bot.computer) return;
+  }
   const controlBotId = bot.computer.controlBotId;
   const controlLeaseId = bot.computer.controlLeaseId;
   if (bot.computer.controlHolder !== "user" || !controlBotId || controlBotId !== bot.id) return;
+  if (expectedRunId !== undefined && bot.computer.controlRunId !== expectedRunId) return;
   if (!hasActiveComputerControl(bot.computer) || !controlLeaseId) {
     // Stale controlHolder=user. Prefer expiry (revokes provider control). If a lease id
     // remains after a failed revoke, keep it so reconciliation can retry.

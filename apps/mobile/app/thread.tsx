@@ -8,7 +8,12 @@ import type {
   MessageReaction,
   Routine,
 } from "@rakazo/contracts";
-import { canReactToThreadMessage, MESSAGE_REACTIONS } from "@rakazo/contracts";
+import {
+  attachmentMaxBytes,
+  canReactToThreadMessage,
+  isAttachmentAudioMimeType,
+  MESSAGE_REACTIONS,
+} from "@rakazo/contracts";
 import type { SlashActionId, ThreadItem } from "@rakazo/core";
 import {
   abortableDelay,
@@ -26,6 +31,7 @@ import {
   isSecretAskBlock,
   latestAnswerableAskMessageId,
   leaveThreadWindow,
+  normalizeRunError,
   openThreadWindow,
   plainTextFromMarkdown,
   projectMessageReactions,
@@ -83,11 +89,21 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
-import { KeyboardAvoidingView, useKeyboardState } from "react-native-keyboard-controller";
-import { useReducedMotion } from "react-native-reanimated";
+import {
+  KeyboardAvoidingView,
+  KeyboardController,
+  useKeyboardHandler,
+} from "react-native-keyboard-controller";
+import Animated, {
+  interpolate,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+} from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppConnectCard } from "../components/AppConnectCard";
 import { AskActions } from "../components/AskActions";
+import { AudioAttachment } from "../components/audio-attachment";
 import { BotAvatar } from "../components/bot-avatar";
 import { ChoiceCard } from "../components/ChoiceCard";
 import { ComputerCard } from "../components/ComputerCard";
@@ -96,6 +112,7 @@ import { FailedSendBubble } from "../components/failed-send-bubble";
 import { GlassSurface } from "../components/glass-surface";
 import type { ImageArtifactPreviewTarget } from "../components/image-artifact-viewer";
 import { InlineImageAttachment } from "../components/inline-image-attachment";
+import { InstructionUndo } from "../components/instruction-undo";
 import { McpApprovalCard } from "../components/McpApprovalCard";
 import type { MarkdownArtifactPreviewTarget } from "../components/markdown-artifact-preview";
 import { MarkdownArtifactPreview } from "../components/markdown-artifact-preview";
@@ -109,9 +126,11 @@ import { SelectTextSheet } from "../components/select-text-sheet";
 import { trailingHeaderOptions } from "../components/sheet-header";
 import type { ThreadComposerHandle } from "../components/thread-composer";
 import { ThreadComposer } from "../components/thread-composer";
+import { createThreadHeaderStyles } from "../components/thread-header-styles";
 import { TimeSeparator } from "../components/time-separator";
 import { VoiceChatCard } from "../components/VoiceChatCard";
 import { WorkingIndicator } from "../components/WorkingIndicator";
+import { readableGutter } from "../lib/adaptive-layout";
 import type {
   MobileBot,
   MobileGroup,
@@ -144,12 +163,12 @@ import { confirmDeleteBot, restoreArchivedBot } from "../lib/bot-lifecycle";
 import { retainUnchangedBotRoster } from "../lib/bot-roster";
 import { findSwitchTarget, ringOnArrival, takeRingOnArrival } from "../lib/bot-switch";
 import { setCallProviderTranscribe, startCall, useCallSession } from "../lib/call-session";
-import { transparentColor } from "../lib/color";
 import { loadDeviceVoiceEnabled } from "../lib/device-voice";
 import { available as dictationAvailable } from "../lib/dictation";
 import { cancelFocusPrompt, focusPromptThreadActive } from "../lib/focus-prompt";
 import { dateLocaleForUi, t, useI18n } from "../lib/i18n";
 import { isInlineImageMimeType } from "../lib/inline-image";
+import { integrationsCacheScope, isIntegrationsScopeCurrent } from "../lib/integrations-cache";
 import { saveLastBotId } from "../lib/last-bot";
 import {
   dismissThreadNotifications,
@@ -167,7 +186,7 @@ import {
   truncateQuoteExcerpt,
 } from "../lib/message-presentation";
 import { native, useMobileTokens, useResolvedAppearance, useThemedStyles } from "../lib/native";
-import { iosAtLeast } from "../lib/native-controls";
+import { HEADER_TITLE_MAX_FONT_SCALE, iosAtLeast } from "../lib/native-controls";
 import {
   threadRouteSpaceOnFocus,
   threadSpaceRequest,
@@ -180,15 +199,31 @@ import {
   getCachedResponseStreamingEnabled,
   subscribeResponseStreaming,
 } from "../lib/response-streaming";
+import type { SavedChatsScope } from "../lib/saved-chats";
+import {
+  liveSavedChatsScope,
+  loadSavedInbox,
+  readSavedThread,
+  savedChatsScope,
+  savedChatTarget,
+  writeSavedThread,
+} from "../lib/saved-chats";
 import { secretDestinationLabel } from "../lib/secret-destination";
 import { selectableTextFromMarkdown } from "../lib/selectable-text";
+import {
+  currentReadySessionGeneration,
+  currentSessionGeneration,
+  loadVerifiedIntegrationsScope,
+  subscribeSessionGeneration,
+} from "../lib/session";
 import type { SendAttempt } from "../lib/thread-feedback";
-import { deliverSend, settleComposer, useThreadFeedback } from "../lib/thread-feedback";
+import { confirmEchoes, subscribeDelivered, useThreadFeedback } from "../lib/thread-feedback";
 import { ThreadJumpAnchor } from "../lib/thread-jump";
 import { ThreadReadOnlyContext } from "../lib/thread-read-only";
 import type { ThreadScrollAction, ThreadScrollState } from "../lib/thread-scroll";
 import { ThreadScrollBehavior } from "../lib/thread-scroll";
 import { reconcileVisibleThreadSnapshot } from "../lib/thread-snapshot";
+import { prepareUnsentSends } from "../lib/unsent-sends";
 import { errorText } from "../lib/user-error";
 import { speakQueue, speakText } from "../lib/voice";
 import {
@@ -227,7 +262,8 @@ function formatApprovalAnswer(
 function formatAttachmentSkip(item: { name: string; reason: string }): string {
   const name = item.name === "camera" ? t("Camera") : item.name;
   if (item.reason === "permission denied") return t("{name} (permission denied)", { name });
-  if (item.reason === "over 10 MiB") return t("{name} (over 10 MiB)", { name });
+  if (item.reason.startsWith("over "))
+    return t("{name} (over {limit})", { name, limit: item.reason.slice(5) });
   if (item.reason === "unsupported type") return t("{name} (unsupported type)", { name });
   const maxMatch = /^max (\d+) attachments$/.exec(item.reason);
   if (maxMatch) {
@@ -257,6 +293,38 @@ function speakableMessageText(message: MobileMessage): string {
 }
 
 export default function ThreadRoute() {
+  const generation = useSyncExternalStore(subscribeSessionGeneration, currentSessionGeneration);
+  const ready = useSyncExternalStore(subscribeSessionGeneration, currentReadySessionGeneration);
+  const [owner, setOwner] = useState<{ key: string; generation: number } | null>(null);
+  useEffect(() => {
+    if (generation !== ready) return;
+    const apiBase = currentApiBase();
+    let cancelled = false;
+    let notified = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const verify = () =>
+      void loadVerifiedIntegrationsScope()
+        .then((saved) => (saved?.apiBase === apiBase ? saved : integrationsCacheScope()))
+        .then((scope) => {
+          if (
+            !cancelled &&
+            scope &&
+            generation === currentSessionGeneration() &&
+            apiBase === currentApiBase()
+          )
+            setOwner({ key: JSON.stringify([apiBase, scope.userId]), generation });
+        })
+        .catch((error) => {
+          if (!cancelled && !notified) Alert.alert(t("Could not continue"), errorText(error));
+          notified = true;
+          if (!cancelled) timer = setTimeout(verify, 5_000);
+        });
+    verify();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [generation, ready]);
   const tokens = useMobileTokens();
   const { t } = useI18n();
   const router = useRouter();
@@ -307,7 +375,15 @@ export default function ThreadRoute() {
     };
   }, [activeSpaceId, focused, spaceId]);
 
-  if (request.action === "show" && !focusSync.switchFailed) return <Thread />;
+  if (request.action === "show" && !focusSync.switchFailed)
+    return (
+      <>
+        {owner?.generation !== generation ? <ActivityIndicator color={tokens.foreground} /> : null}
+        <View style={{ flex: 1, display: owner?.generation === generation ? "flex" : "none" }}>
+          {owner ? <Thread key={owner.key} sessionEpoch={ready} /> : null}
+        </View>
+      </>
+    );
   return (
     <View
       style={{
@@ -333,60 +409,7 @@ export default function ThreadRoute() {
   );
 }
 
-function createThreadHeaderStyles() {
-  const tokens = mobileTokens();
-  const transparentBackground = transparentColor(tokens.background);
-  return StyleSheet.create({
-    titleCapsule: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 10,
-      maxWidth: 220,
-      paddingVertical: 4,
-      paddingStart: 6,
-      paddingEnd: 14,
-      borderRadius: 999,
-    },
-    titleCapsuleFill: {
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: tokens.border,
-      backgroundColor: tokens.card,
-    },
-    title: {
-      color: tokens.foreground,
-      fontSize: 18,
-      fontWeight: "600",
-    },
-    circleButton: {
-      flex: 1,
-      borderRadius: 999,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    composerFill: {
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: tokens.border,
-      backgroundColor: tokens.card,
-    },
-    headerFade: {
-      position: "absolute",
-      top: 0,
-      left: 0,
-      right: 0,
-      experimental_backgroundImage: `linear-gradient(to bottom, ${tokens.background} 0%, ${tokens.background} 58%, ${transparentBackground} 100%)`,
-    },
-    composerFade: {
-      position: "absolute",
-      bottom: "100%",
-      left: -20,
-      right: -20,
-      height: 24,
-      experimental_backgroundImage: `linear-gradient(to top, ${tokens.background} 0%, ${transparentBackground} 100%)`,
-    },
-  });
-}
-
-function Thread() {
+function Thread({ sessionEpoch }: { sessionEpoch: number }) {
   const colorScheme = useResolvedAppearance();
   const tokens = mobileTokens();
   const styles = useThemedStyles(createThreadHeaderStyles);
@@ -398,7 +421,35 @@ function Thread() {
   const nativeHeaderHeight = useHeaderHeight();
   const headerHeight = iosAtLeast(26) ? nativeHeaderHeight : 0;
   const insets = useSafeAreaInsets();
-  const keyboardVisible = useKeyboardState((state) => state.isVisible);
+  // An unfolded or tablet window keeps messages and the composer in a centred reading column.
+  const columnInset = readableGutter(windowWidth, Math.max(insets.left, insets.right));
+  const columnWidth = windowWidth - columnInset * 2;
+  // Frame by frame, including a swipe that drags the keyboard down.
+  const keyboardProgress = useSharedValue(KeyboardController.isVisible() ? 1 : 0);
+  useKeyboardHandler(
+    {
+      onMove: (event) => {
+        "worklet";
+        keyboardProgress.value = event.progress;
+      },
+      onInteractive: (event) => {
+        "worklet";
+        keyboardProgress.value = event.progress;
+      },
+      onEnd: (event) => {
+        "worklet";
+        keyboardProgress.value = event.progress;
+      },
+    },
+    [],
+  );
+  const composerRestingPadding =
+    Platform.OS === "ios" ? insets.bottom : Math.max(insets.bottom + 12, 24);
+  // Hands the composer from the keyboard to the safe area as the keyboard moves, so it never
+  // dips into the home indicator and then jumps back up.
+  const composerKeyboardPadding = useAnimatedStyle(() => ({
+    paddingBottom: interpolate(keyboardProgress.value, [0, 1], [composerRestingPadding, 12]),
+  }));
   const {
     botId,
     groupId,
@@ -479,6 +530,10 @@ function Thread() {
       : undefined;
   const [snap, setSnap] = useState<MobileSnapshot | null>(null);
   const snapRef = useRef<MobileSnapshot | null>(null);
+  // The copy saved on this device stays on screen until a live snapshot replaces it.
+  const [showingSaved, setShowingSaved] = useState(false);
+  const snapshotOrigin = useRef<SavedChatsScope | null>(null);
+  const pendingSave = useRef<(() => void) | null>(null);
   const streamResponses = useSyncExternalStore(
     subscribeResponseStreaming,
     getCachedResponseStreamingEnabled,
@@ -494,11 +549,23 @@ function Thread() {
   }
 
   useEffect(() => {
-    const visible = withLiveStreamingProgress(snapRef.current, streamResponses);
-    setSnap((previous) => reconcileVisibleThreadSnapshot(previous, visible));
+    commitSnap(snapRef.current);
   }, [streamResponses]);
   const activeThreadId = useRef<string | undefined>(undefined);
   const [agentSkills, setAgentSkills] = useState<AgentSkillCatalogEntry[]>([]);
+  const [uploadConfig, setUploadConfig] = useState<{ maxUploadSizeBytes?: number }>();
+  useEffect(() => {
+    let cancelled = false;
+    void rpc<{ maxUploadSizeBytes?: number }>("me")
+      .then((me) => {
+        if (!cancelled) setUploadConfig(me);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const [mentionBots, setMentionBots] = useState<MobileBot[]>([]);
   // The call outlives renders, so its switch check reads the newest bot list from here.
   const mentionBotsRef = useRef<MobileBot[]>([]);
@@ -519,7 +586,7 @@ function Thread() {
   const [quoteTarget, setQuoteTarget] = useState<MobileMessage | null>(null);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
-  const pendingDeliveries = useRef(0);
+  const preparingSend = useRef(false);
   const feedback = useThreadFeedback(threadKey, newClientNonce);
   const { error, setError } = feedback;
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -607,7 +674,7 @@ function Thread() {
       botId: currentBot.id,
       autoSpeak: currentBot.autoSpeak,
       focused: AppState.currentState === "active" && navigation.isFocused(),
-      snapshotReady: snap?.botId === currentBot.id,
+      snapshotReady: snap?.botId === currentBot.id && !showingSaved,
       lastSpokenBotId: autoSpokenBotId.current,
       lastSpokenMessageId: autoSpoken.current,
       runStatus: snap?.run?.status,
@@ -628,7 +695,16 @@ function Thread() {
         color: resolvePersonaColorDef(currentBot.id, currentBot.color).light,
       },
     }).catch(() => undefined);
-  }, [botId, inGroup, currentBot, navigation, snap?.botId, snap?.messages, snap?.run?.status]);
+  }, [
+    botId,
+    inGroup,
+    currentBot,
+    navigation,
+    showingSaved,
+    snap?.botId,
+    snap?.messages,
+    snap?.run?.status,
+  ]);
 
   const speakFinishedReplyRef = useRef(speakFinishedReply);
   useLayoutEffect(() => {
@@ -672,7 +748,13 @@ function Thread() {
         }
       }
     } catch {
-      // Keep the last known roster if refresh fails.
+      // Keep the last known roster if refresh fails. Before any, use the bots saved with the
+      // inbox, so a saved chat offline keeps its bot's colour and avatar.
+      if (mentionBotsAppliedGeneration.current !== 0) return;
+      const saved = await loadSavedInbox();
+      if (!saved || mentionBotsAppliedGeneration.current !== 0) return;
+      if (targetBotId !== activeBotId.current) return;
+      setMentionBots((current) => (current.length ? current : saved.bots));
     }
   }, [botId, groupId, router]);
 
@@ -776,10 +858,14 @@ function Thread() {
                 identity={currentBot.id}
                 size={28}
                 status={currentBotStatus}
-                muted={!currentBot.notifyOnFinish}
+                muted={currentBot.notifyOnFinish === false}
               />
             ) : null}
-            <Text numberOfLines={1} style={styles.title}>
+            <Text
+              maxFontSizeMultiplier={HEADER_TITLE_MAX_FONT_SCALE}
+              numberOfLines={1}
+              style={styles.title}
+            >
               {displayName || t("Thread")}
             </Text>
           </GlassSurface>
@@ -963,16 +1049,53 @@ function Thread() {
     setBotActionsOpen(true);
   }
 
+  /** Shows the chat's saved copy until live data for it arrives; never under a search jump. */
+  function showSavedThread(signal: AbortSignal) {
+    const target = savedChatTarget({ botId, groupId });
+    // Another chat's messages must never stay on screen under this chat's name.
+    if (snapRef.current && savedChatTarget(snapRef.current) !== target) {
+      commitSnap(null);
+      setShowingSaved(false);
+    }
+    void savedChatsScope().then((scope) => {
+      if (signal.aborted || !scope) return;
+      const onScreen = snapRef.current;
+      if (messageId || (onScreen && savedChatTarget(onScreen) === target)) return;
+      const saved = readSavedThread(scope, target);
+      if (!saved) return;
+      snapshotOrigin.current = scope;
+      commitSnap(saved);
+      setShowingSaved(true);
+    });
+  }
+
   async function refresh() {
     if (!botId && !groupId) return;
     const targetBotId = botId;
     const targetGroupId = groupId;
     const epoch = historyEpoch.current;
+    const origin = {
+      sessionGeneration: currentSessionGeneration(),
+      selectionId: selectedSpaceId(),
+    };
     const generation = ++refreshGeneration.current;
     const next = await rpc<MobileSnapshot>(
       "threads/get",
       targetGroupId ? { groupId: targetGroupId } : { botId: targetBotId! },
     );
+    if (
+      origin.sessionGeneration !== currentSessionGeneration() ||
+      origin.selectionId !== selectedSpaceId()
+    )
+      return;
+    const scope = await liveSavedChatsScope();
+    if (
+      !scope ||
+      scope.sessionGeneration !== origin.sessionGeneration ||
+      scope.selectionId !== origin.selectionId ||
+      !isIntegrationsScopeCurrent(scope)
+    )
+      return;
     // Only the newest started refresh may commit. Threads also receive live
     // events; an older snapshot must not overwrite those while a newer refresh
     // is already in flight. The subscription starts from the snapshot returned
@@ -990,9 +1113,13 @@ function Thread() {
       activeGroupId: activeGroupId.current,
     });
     if (result.commit) {
+      snapshotOrigin.current = scope;
+      pendingSave.current = null;
+      writeSavedThread(scope, savedChatTarget(next), next);
       commitSnap(
         mergeMobileSnapshot(snapRef.current, next, expandedHistoryThread.current === next.threadId),
       );
+      setShowingSaved(false);
     }
     if (isCurrentTarget(targetBotId, targetGroupId)) {
       feedback.refreshed(targetGroupId ?? targetBotId);
@@ -1005,6 +1132,8 @@ function Thread() {
     const epoch = historyEpoch.current;
     jumpGeneration.current += 1;
     const jumpId = jumpGeneration.current;
+    const scope = await liveSavedChatsScope();
+    if (!scope || !isIntegrationsScopeCurrent(scope)) return;
     const [snap, page] = await Promise.all([
       rpc<MobileSnapshot>("threads/get", threadTarget),
       rpc<MobileMessagePage>("threads/messages", {
@@ -1014,7 +1143,12 @@ function Thread() {
     ]);
     // The epoch check drops a jump that raced a conversation clear (or a bot switch); the
     // generation check drops an older same-thread jump that finished after a newer one.
-    if (epoch !== historyEpoch.current || jumpId !== jumpGeneration.current) return;
+    if (
+      epoch !== historyEpoch.current ||
+      jumpId !== jumpGeneration.current ||
+      !isIntegrationsScopeCurrent(scope)
+    )
+      return;
     if (target.groupId && activeGroupId.current !== target.groupId) return;
     if (target.botId && activeBotId.current !== target.botId) return;
     const targetInPage = page.messages.some((message) => message.id === target.messageId);
@@ -1035,7 +1169,9 @@ function Thread() {
     pinnedScrollMetrics.current = { offset: 0, viewport: 0, content: 0 };
     // Publish the jump refs even when the opened snapshot is already visible.
     setThreadScrollState(scrollBehavior.current.state());
+    snapshotOrigin.current = scope;
     commitSnap(opened?.snapshot ?? snap);
+    setShowingSaved(false);
   }
 
   async function loadNewerMessages() {
@@ -1238,16 +1374,13 @@ function Thread() {
 
   useEffect(() => {
     if (!botId && !groupId) return;
-    if (!messageId) {
-      pinnedAroundRef.current = null;
-      jumpScrollTarget.current = null;
-      jumpAnchor.current.release();
-    }
-    expandedHistoryThread.current = null;
+    // Invalidate pending history loads while retaining pages already loaded for this chat.
     historyEpoch.current += 1;
     const abort = new AbortController();
     const subscriptionGeneration = ++liveSubscriptionGeneration.current;
+    const sessionGeneration = currentSessionGeneration();
     liveSubscribed.current = false;
+    showSavedThread(abort.signal);
     void (async () => {
       // Pending search jumps load the around-page separately; avoid replacing it with latest.
       const next = messageId
@@ -1264,13 +1397,14 @@ function Thread() {
       if (abort.signal.aborted || readOnly) return;
       let cursor = next?.cursor ?? -1;
       let retryMs = 250;
-      while (!abort.signal.aborted) {
+      while (!abort.signal.aborted && sessionGeneration === currentSessionGeneration()) {
         try {
           liveSubscribed.current = true;
           await subscribeThread(
             groupId ? { groupId } : { botId: botId! },
             cursor,
             (event) => {
+              if (sessionGeneration !== currentSessionGeneration()) return;
               cursor = Math.max(cursor, event.seq ?? -1);
               retryMs = 250;
               if (
@@ -1330,7 +1464,33 @@ function Thread() {
     return () => {
       abort.abort();
     };
-  }, [botId, groupId, readOnly, markReadIfVisible, refreshMentionBots]);
+  }, [botId, groupId, readOnly, markReadIfVisible, refreshMentionBots, sessionEpoch]);
+
+  useEffect(() => () => pendingSave.current?.(), [botId, groupId]);
+
+  // Save the latest messages of the live chat (not a jump or loaded history) once updates settle.
+  useEffect(() => {
+    if (
+      !snap ||
+      showingSaved ||
+      jumpScrollTarget.current ||
+      pinnedAroundRef.current ||
+      expandedHistoryThread.current
+    )
+      return;
+    const target = savedChatTarget({ botId, groupId });
+    const latest = snapRef.current;
+    if (!latest || savedChatTarget(latest) !== target) return;
+    const origin = snapshotOrigin.current;
+    if (!origin) return;
+    const write = () => writeSavedThread(origin, target, latest);
+    pendingSave.current = write;
+    const timer = setTimeout(() => {
+      pendingSave.current?.();
+      pendingSave.current = null;
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [snap, showingSaved, botId, groupId]);
 
   useEffect(() => {
     if (!botId && !groupId) return;
@@ -1378,7 +1538,7 @@ function Thread() {
         setError(errorText(err, t("Could not open message")));
       },
     );
-  }, [botId, groupId, messageId]);
+  }, [botId, groupId, messageId, sessionEpoch]);
 
   useEffect(() => {
     setPendingAttachments((current) => attachmentsForThread(current, threadKey));
@@ -1408,7 +1568,7 @@ function Thread() {
     if (readOnly) return;
     const initialBotTarget = botId;
     const initialGroupTarget = groupId;
-    if ((!initialBotTarget && !initialGroupTarget) || sending) return;
+    if ((!initialBotTarget && !initialGroupTarget) || sending || preparingSend.current) return;
     const originThreadKey = initialGroupTarget ?? initialBotTarget;
     const submitted = composerRef.current?.snapshot();
     if (!submitted) return;
@@ -1427,67 +1587,82 @@ function Thread() {
       openBotChat(typedSwitch, false);
       return;
     }
+    preparingSend.current = true;
+    try {
+      await prepareUnsentSends();
+    } catch (error) {
+      Alert.alert(t("Failed to send message"), errorText(error));
+      return;
+    } finally {
+      preparingSend.current = false;
+    }
+    if (
+      !isCurrentTarget(initialBotTarget, initialGroupTarget) ||
+      JSON.stringify(submitted) !== JSON.stringify(composerRef.current?.snapshot())
+    )
+      return;
     const reroutedToGroup = Boolean(
       plan.rerouteGroupId && plan.rerouteGroupId !== initialGroupTarget,
     );
     const groupTarget = plan.rerouteGroupId ?? initialGroupTarget;
     const botTarget = reroutedToGroup ? undefined : initialBotTarget;
-    const attempt = feedback.sendAttempt({
-      originThreadKey: originThreadKey!,
-      displayText: submitted.promptText,
-      replyPreview: replyQuote ?? (replyTarget ? previewMessageText(replyTarget) : null),
-      initialBotTarget,
-      botTarget,
-      groupTarget,
-      reroutedToGroup,
-      plan,
-      attachments: attachments.map((attachment) => ({ ...attachment })),
-      replyTargetId: replyTarget?.id,
-      replyQuote,
-    });
-    await deliver(attempt, () => {
-      if (originThreadKey !== (activeGroupId.current ?? activeBotId.current)) return;
-      const current = composerRef.current?.snapshot();
-      if (!current) return;
-      const settled = settleComposer(submitted, current);
-      setPendingAttachments((current) =>
-        current.filter((attachment) => !submitted.attachmentIds.includes(attachment.id)),
-      );
-      if (!settled.clearComposer) return;
-      composerRef.current?.reset();
-      setReplyTarget(null);
-      setReplyQuote(null);
-      setAttachmentNotice(null);
-    });
+    let attempt: SendAttempt;
+    try {
+      attempt = feedback.sendAttempt({
+        originThreadKey: originThreadKey!,
+        displayText: submitted.promptText,
+        replyPreview: replyQuote ?? (replyTarget ? previewMessageText(replyTarget) : null),
+        initialBotTarget,
+        botTarget,
+        groupTarget,
+        reroutedToGroup,
+        plan,
+        attachments,
+        replyTargetId: replyTarget?.id,
+        replyQuote,
+      });
+    } catch (error) {
+      Alert.alert(t("Failed to send message"), errorText(error));
+      return;
+    }
+    composerRef.current?.reset();
+    setPendingAttachments((current) =>
+      current.filter((attachment) => !submitted.attachmentIds.includes(attachment.id)),
+    );
+    setReplyTarget(null);
+    setReplyQuote(null);
+    setAttachmentNotice(null);
+    if (pinnedAroundRef.current) showLatest();
+    performScroll(scrollBehavior.current.jumpToLatest());
+    publishThreadScrollState(scrollBehavior.current.state());
+    await deliver(attempt);
   }
 
-  async function deliver(attempt: SendAttempt, onSettled?: () => void) {
-    if (readOnly || !feedback.start(attempt)) return;
+  async function deliver(attempt: SendAttempt, force = false) {
+    if (!readOnly) await feedback.send(attempt, force);
+  }
+
+  function afterDelivered(attempt: SendAttempt) {
     const { initialBotTarget, botTarget, groupTarget, reroutedToGroup, plan } = attempt.payload;
-    pendingDeliveries.current += 1;
-    setSending(true);
-    try {
-      await deliverSend(attempt.payload, attempt, rpc);
-    } catch (err) {
-      attempt.error = errorText(err, t("Failed to send message"));
-      feedback.sendFailed(attempt);
-      if (attempt.payload.originThreadKey === (activeGroupId.current ?? activeBotId.current)) {
-        if (pinnedAroundRef.current) showLatest();
-        performScroll(scrollBehavior.current.jumpToLatest());
-        publishThreadScrollState(scrollBehavior.current.state());
-      }
-      return;
-    } finally {
-      onSettled?.();
-      pendingDeliveries.current -= 1;
-      setSending(pendingDeliveries.current > 0);
-    }
-    feedback.sent(attempt);
     if (initialBotTarget) cancelFocusPrompt(initialBotTarget);
+    const generation = currentSessionGeneration();
+    const apiBase = currentApiBase();
+    const spaceId = selectedSpaceId();
     void loadSessionToken()
-      .then((token) => resumeLiveNotifications(currentApiBase(), token, selectedSpaceId() ?? ""))
+      .then((token) => {
+        if (
+          generation === currentSessionGeneration() &&
+          apiBase === currentApiBase() &&
+          spaceId === selectedSpaceId()
+        )
+          return resumeLiveNotifications(apiBase, token, spaceId ?? "");
+      })
       .catch(() => undefined);
-    if (attempt.payload.originThreadKey !== (activeGroupId.current ?? activeBotId.current)) return;
+    if (
+      attempt.payload.originThreadKey !== (activeGroupId.current ?? activeBotId.current) ||
+      !navigation.isFocused()
+    )
+      return;
     if (reroutedToGroup && groupTarget) {
       router.push({
         pathname: "/group-thread",
@@ -1500,6 +1675,20 @@ function Thread() {
       void refresh().catch(() => undefined);
     }
   }
+
+  const afterDeliveredRef = useRef(afterDelivered);
+  afterDeliveredRef.current = afterDelivered;
+  useEffect(() => subscribeDelivered((attempt) => afterDeliveredRef.current(attempt)), []);
+  useEffect(() => {
+    if (snap && (snap.groupId ?? snap.botId) === threadKey) {
+      confirmEchoes(
+        threadKey!,
+        snap.messages.flatMap((message) =>
+          message.role === "user" && message.seq !== undefined ? [message.seq] : [],
+        ),
+      );
+    }
+  }, [snap, threadKey]);
 
   async function stop() {
     if (readOnly) return;
@@ -1691,14 +1880,17 @@ function Thread() {
   }
 
   async function addAttachments(
-    picker: (existingCount: number) => Promise<{
+    picker: (
+      existingCount: number,
+      maxBytes: number,
+    ) => Promise<{
       attachments: PickedAttachment[];
       skipped: Array<{ name: string; reason: string }>;
     }>,
   ) {
     const targetKey = groupId ?? botId;
     if (!targetKey) return;
-    const result = await picker(activePendingAttachments.length);
+    const result = await picker(activePendingAttachments.length, attachmentMaxBytes(uploadConfig));
     if ((groupId ?? botId) !== targetKey) return;
     if (result.attachments.length) {
       setPendingAttachments((current) => [
@@ -1814,12 +2006,16 @@ function Thread() {
     const targetGroupId = groupId;
     if (!targetBotId && !targetGroupId) return;
     try {
-      await rpc("threads/react", {
+      const result = await rpc<{ ok: true; runIds?: string[] }>("threads/react", {
         ...(targetGroupId ? { groupId: targetGroupId } : { botId: targetBotId! }),
         messageId: message.id,
         reaction,
         clientNonce: newClientNonce(),
       });
+      if (result.runIds?.length && isCurrentTarget(targetBotId, targetGroupId)) {
+        // The reaction is saved; a failed refresh is caught up by live events.
+        await refresh().catch(() => {});
+      }
     } catch (err) {
       if (!isCurrentTarget(targetBotId, targetGroupId)) return;
       Alert.alert(t("Could not update reaction"), errorText(err, t("Try again.")));
@@ -1945,7 +2141,7 @@ function Thread() {
           activityColor={activityBot?.color}
           activityStatus={activityStatus}
           inGroup={inGroup}
-          windowWidth={windowWidth}
+          columnWidth={columnWidth}
           enableJump={options?.enableJump ?? false}
           index={options?.index ?? 0}
         />
@@ -1970,7 +2166,7 @@ function Thread() {
       answerableAskMessageId,
       highlightedMessageId,
       separatorIds,
-      windowWidth,
+      columnWidth,
       t,
       locale,
     ],
@@ -2067,11 +2263,11 @@ function Thread() {
       </Pressable>
     ) : null;
 
-  const failedSendBubbles = feedback.failedSends.map((attempt) => (
+  const failedSendBubbles = feedback.unsentSends.map((attempt) => (
     <FailedSendBubble
       key={attempt.clientNonce}
       attempt={attempt}
-      onRetry={() => void deliver(attempt)}
+      onRetry={() => void deliver(attempt, true)}
       onDelete={() => feedback.discard(attempt)}
     />
   ));
@@ -2079,16 +2275,31 @@ function Thread() {
   return (
     <KeyboardAvoidingView
       behavior="height"
-      keyboardVerticalOffset={0}
-      style={{ flex: 1, backgroundColor: tokens.background, paddingHorizontal: 20 }}
+      // Android lays out the screen below the opaque native navigation header.
+      keyboardVerticalOffset={Platform.OS === "android" ? nativeHeaderHeight : 0}
+      style={{
+        flex: 1,
+        backgroundColor: tokens.background,
+        paddingHorizontal: 20 + columnInset,
+      }}
     >
       {error ? (
-        <Text style={{ color: tokens.mutedForeground, marginTop: headerHeight + 28 }}>{error}</Text>
+        <Text style={{ color: tokens.mutedForeground, marginTop: headerHeight + 28 }}>
+          {showingSaved ? t("Couldn't refresh — showing the last loaded messages.") : error}
+        </Text>
       ) : null}
       {runError ? (
-        <Text style={{ color: tokens.destructive, marginTop: error ? 12 : headerHeight + 28 }}>
-          {runError}
-        </Text>
+        <View style={{ marginTop: error ? 12 : headerHeight + 28 }}>
+          <Text style={{ color: tokens.mutedForeground, fontSize: 13.5 }}>
+            {normalizeRunError(runError, t, locale).summary}
+          </Text>
+          <NativeActionButton
+            label={t("Details")}
+            prominence="quiet"
+            size="compact"
+            onPress={() => setSelectableText(runError)}
+          />
+        </View>
       ) : null}
       {/* The floor keeps a tall suggestion list from sliding under the transparent header. */}
       <View style={{ flex: 1, minHeight: headerHeight, position: "relative" }}>
@@ -2098,6 +2309,7 @@ function Thread() {
             ref={pinnedScroll}
             style={{ flex: 1 }}
             contentContainerStyle={{ paddingTop: headerHeight + 8, paddingBottom: 16 }}
+            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
             maintainVisibleContentPosition={messageListPosition}
             scrollEventThrottle={16}
             onLayout={(event) => {
@@ -2161,6 +2373,8 @@ function Thread() {
             // This callback tracks every row input, including reply, reaction and highlight state.
             extraData={renderMessageRow}
             style={messageListStyles.list}
+            // Swiping down hides the keyboard; on iOS it follows the finger.
+            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
             // Inverted, so the bottom padding is the visual top, clear of the transparent header.
             contentContainerStyle={listContentStyle}
             maintainVisibleContentPosition={messageListPosition}
@@ -2263,12 +2477,8 @@ function Thread() {
         <View pointerEvents="none" style={[styles.headerFade, { height: headerHeight + 24 }]} />
       ) : null}
       {/* Shrinks (the suggestion lists scroll) so the input and Send stay above the keyboard. */}
-      <View
-        style={{
-          display: readOnly ? "none" : "flex",
-          flexShrink: 1,
-          paddingBottom: keyboardVisible ? 12 : Math.max(insets.bottom + 12, 24),
-        }}
+      <Animated.View
+        style={[{ display: readOnly ? "none" : "flex", flexShrink: 1 }, composerKeyboardPadding]}
       >
         {/* Fades messages out above the composer, like the header fade. */}
         <View pointerEvents="none" style={styles.composerFade} />
@@ -2398,7 +2608,7 @@ function Thread() {
           startVoiceCall={startVoiceCall}
           onSlashAction={runSlashAction}
         />
-      </View>
+      </Animated.View>
       <Modal
         visible={botActionsOpen}
         transparent
@@ -2652,7 +2862,7 @@ type MessageRowProps = {
   activityColor?: string;
   activityStatus?: MobileBot["status"];
   inGroup: boolean;
-  windowWidth: number;
+  columnWidth: number;
   enableJump: boolean;
   index: number;
 };
@@ -2678,7 +2888,7 @@ const MessageRow = memo(function MessageRow({
   activityColor,
   activityStatus,
   inGroup,
-  windowWidth,
+  columnWidth,
   enableJump,
   index,
 }: MessageRowProps) {
@@ -2863,10 +3073,10 @@ const MessageRow = memo(function MessageRow({
             actions={menu}
             maxWidth={
               isCenteredAgentEvent(message.blocks)
-                ? windowWidth - 40
+                ? columnWidth - 40
                 : activityBotId
-                  ? windowWidth - 40 - (inGroup ? 28 : 36)
-                  : (windowWidth - 40) * 0.9
+                  ? columnWidth - 40 - (inGroup ? 28 : 36)
+                  : (columnWidth - 40) * 0.9
             }
             colorScheme={colorScheme}
             onAction={onMenuAction}
@@ -2973,6 +3183,19 @@ const MessageBubble = memo(function MessageBubble({
     (block): block is Extract<MessageBlock, { kind: "mcp_approval" }> =>
       block.kind === "mcp_approval",
   );
+  const undoBlock = message.blocks.find(
+    (block): block is Extract<MessageBlock, { kind: "ask" }> =>
+      block.kind === "ask" && Boolean(block.instructionUpdate?.undoVersionId),
+  );
+  if (undoBlock?.instructionUpdate?.undoVersionId) {
+    return (
+      <InstructionUndo
+        botId={undoBlock.instructionUpdate.botId}
+        versionId={undoBlock.instructionUpdate.undoVersionId}
+        instructions={undoBlock.instructionUpdate.after}
+      />
+    );
+  }
   const ask = message.blocks.find(
     (block): block is Extract<MessageBlock, { kind: "ask" }> =>
       block.kind === "ask" && !isApprovalAskBlock(block) && !block.actions?.length,
@@ -3297,58 +3520,71 @@ const MessageBubble = memo(function MessageBubble({
             paddingVertical: 14,
           }}
         >
-          {askBlock.text ? (
-            <Text
-              {...actionProps}
-              style={{ color: tokens.foreground, fontSize: 15.5, lineHeight: 23 }}
-            >
-              {askBlock.text}
-            </Text>
-          ) : null}
-          {askBlock.detail ? (
-            <Text
-              {...(askBlock.text ? {} : actionProps)}
-              style={{
-                color: tokens.mutedForeground,
-                marginTop: askBlock.text ? 8 : 0,
-                fontSize: 12.5,
-                fontFamily: "Menlo",
-                lineHeight: 20,
-              }}
-            >
-              {askBlock.detail}
-            </Text>
-          ) : null}
-          {askBlock.status === "answered" ? (
-            <Text
-              {...actionProps}
-              style={{
-                color: tokens.success,
-                marginTop: 12,
-                fontSize: 13.5,
-                fontWeight: "600",
-              }}
-            >
-              {formatApprovalAnswer(
-                askBlock.answer,
-                askBlock.actions,
-                isApprovalAskBlock(askBlock),
-              )}
-            </Text>
-          ) : canAnswer && onAnswer ? (
-            <AskActions
-              actions={askBlock.actions}
-              accessibilityActions={actionProps.accessibilityActions}
-              onAccessibilityAction={actionProps.onAccessibilityAction}
-              onAnswer={(answer) => onAnswer(message, answer)}
+          {askBlock.instructionUpdate?.undoVersionId ? (
+            <InstructionUndo
+              botId={askBlock.instructionUpdate.botId}
+              versionId={askBlock.instructionUpdate.undoVersionId}
+              instructions={askBlock.instructionUpdate.after}
             />
           ) : (
-            <Text
-              {...actionProps}
-              style={{ color: tokens.mutedForeground, marginTop: 12, fontSize: 13.5 }}
-            >
-              {t("No longer active")}
-            </Text>
+            <>
+              {askBlock.text ? (
+                <Text
+                  {...actionProps}
+                  style={{ color: tokens.foreground, fontSize: 15.5, lineHeight: 23 }}
+                >
+                  {askBlock.instructionUpdate ? t("Update instructions?") : askBlock.text}
+                </Text>
+              ) : null}
+              {askBlock.detail ? (
+                <Text
+                  {...(askBlock.text ? {} : actionProps)}
+                  style={{
+                    color: tokens.mutedForeground,
+                    marginTop: askBlock.text ? 8 : 0,
+                    fontSize: 12.5,
+                    fontFamily: "Menlo",
+                    lineHeight: 20,
+                  }}
+                >
+                  {askBlock.detail}
+                </Text>
+              ) : null}
+              {askBlock.status === "answered" ? (
+                <Text
+                  {...actionProps}
+                  style={{
+                    color: tokens.success,
+                    marginTop: 12,
+                    fontSize: 13.5,
+                    fontWeight: "600",
+                  }}
+                >
+                  {askBlock.instructionUpdate
+                    ? t(askBlock.answer === "deny" ? "Dismissed" : "Allowed once")
+                    : formatApprovalAnswer(
+                        askBlock.answer,
+                        askBlock.actions,
+                        isApprovalAskBlock(askBlock),
+                      )}
+                </Text>
+              ) : canAnswer && onAnswer ? (
+                <AskActions
+                  actions={askBlock.actions}
+                  instructions={askBlock.instructionUpdate?.after}
+                  accessibilityActions={actionProps.accessibilityActions}
+                  onAccessibilityAction={actionProps.onAccessibilityAction}
+                  onAnswer={(answer) => onAnswer(message, answer)}
+                />
+              ) : (
+                <Text
+                  {...actionProps}
+                  style={{ color: tokens.mutedForeground, marginTop: 12, fontSize: 13.5 }}
+                >
+                  {t("No longer active")}
+                </Text>
+              )}
+            </>
           )}
         </View>
         {appConnectBlocks.map((block, index) => (
@@ -3472,6 +3708,15 @@ const MessageBubble = memo(function MessageBubble({
                 </Text>
               </Pressable>
             )
+          ) : attachment.artifactId && isAttachmentAudioMimeType(attachment.mimeType ?? "") ? (
+            <AudioAttachment
+              pressableProps={actionProps}
+              key={`${attachment.artifactId}-${index}`}
+              target={artifactTarget}
+              artifactId={attachment.artifactId}
+              name={attachment.name ?? t("File")}
+              mimeType={attachment.mimeType!}
+            />
           ) : (
             <Pressable
               {...actionProps}

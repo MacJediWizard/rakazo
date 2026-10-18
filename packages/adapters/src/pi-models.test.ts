@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { modelAcceptsImageInput } from "./model-vision.js";
 import {
   catalogModelLabel,
   catalogProviderProbeBaseUrl,
@@ -13,6 +14,20 @@ describe("Pi model catalog", () => {
     const custom = listPiCatalog().filter((entry) => entry.provider === "openai-compatible");
     expect(custom).toHaveLength(1);
     expect(custom[0]).toMatchObject({ id: "custom", placeholder: true, reasoning: false });
+  });
+
+  it("says which catalog models support images, the same way runs decide it", () => {
+    const catalog = listPiCatalog();
+    for (const entry of catalog) {
+      if (entry.provider === "openai-compatible") {
+        // The connection's own "Supports images" setting decides this one.
+        expect(entry.images).toBeUndefined();
+      } else {
+        expect(entry.images).toBe(modelAcceptsImageInput(entry.provider, entry.id));
+      }
+    }
+    expect(catalog.some((entry) => entry.images === true)).toBe(true);
+    expect(catalog.some((entry) => entry.images === false)).toBe(true);
   });
 
   afterEach(() => {
@@ -129,13 +144,16 @@ describe("Pi model catalog", () => {
   });
 
   it("accepts catalog model lists larger than the custom-server probe cap", async () => {
-    const ids = Array.from({ length: 600 }, (_, index) => {
+    const ids = Array.from({ length: 5_000 }, (_, index) => {
       const suffix = String(index).padStart(4, "0");
       return `vendor/catalog-model-${suffix}-${"x".repeat(120)}`;
     });
-    const payload = JSON.stringify({ object: "list", data: ids.map((id) => ({ id })) });
-    expect(Buffer.byteLength(payload)).toBeGreaterThan(64 * 1024);
-    expect(ids).toHaveLength(600);
+    const payload = JSON.stringify({
+      object: "list",
+      data: ids.map((id) => ({ id, description: "x".repeat(512) })),
+    });
+    expect(Buffer.byteLength(payload)).toBeGreaterThan(2 * 1024 * 1024);
+    expect(ids).toHaveLength(5_000);
 
     const fetchImpl = async () =>
       new Response(payload, {

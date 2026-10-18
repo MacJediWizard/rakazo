@@ -17,6 +17,11 @@ import {
   setBotsSidebarDensity,
   subscribeBotsSidebarDensity,
 } from "../lib/bots-sidebar-density-pref";
+import {
+  getComposerEnterToSend,
+  setComposerEnterToSend,
+  subscribeComposerEnterToSend,
+} from "../lib/composer-enter-to-send-pref";
 import { getActiveUiLocale, setUiLocale } from "../lib/i18n";
 import {
   getRemoteImagesPreference,
@@ -76,6 +81,12 @@ export function GeneralSettingsPanels({
     () => getToolActivityPreference() === "on",
   );
   const showToolActivityId = useId();
+  const enterToSend = useSyncExternalStore(
+    subscribeComposerEnterToSend,
+    getComposerEnterToSend,
+    () => false,
+  );
+  const enterToSendId = useId();
   const [loadRemoteImages, setLoadRemoteImages] = useState(
     () => getRemoteImagesPreference() === "on",
   );
@@ -126,9 +137,6 @@ export function GeneralSettingsPanels({
           <h3 className="text-[15px] font-medium text-foreground">
             <Trans>Messaging</Trans>
           </h3>
-          <p className="mt-3 text-[13px] text-muted-foreground/70">
-            <Trans>Chat apps, group channels, and agent connections.</Trans>
-          </p>
           <Button variant="secondary" className="mt-3 rounded-full" onClick={onOpenMessaging}>
             <Trans>Manage messaging settings</Trans>
           </Button>
@@ -233,6 +241,18 @@ export function GeneralSettingsPanels({
           </span>
         </summary>
         <div className="border-t border-border px-4 pb-5">
+          <div className="flex items-start gap-3 pt-5">
+            <Switch
+              id={enterToSendId}
+              data-testid="composer-enter-to-send-toggle"
+              className="mt-0.5"
+              checked={enterToSend}
+              onCheckedChange={(checked) => setComposerEnterToSend(checked)}
+            />
+            <Label htmlFor={enterToSendId} className="text-[14px] font-normal text-foreground/75">
+              <Trans>Send with Enter</Trans>
+            </Label>
+          </div>
           <div className="flex items-start gap-3 pt-5">
             <Switch
               id={streamRepliesId}

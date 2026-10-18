@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
-import type { ArtifactStore } from "@rakazo/adapter-kit";
+import type { ArtifactStore, MessagingInboundAttachment } from "@rakazo/adapter-kit";
 import type { Actor } from "@rakazo/contracts";
-import { ATTACHMENT_MAX_COUNT } from "@rakazo/contracts";
+import {
+  ARTIFACT_NAME_MAX_LENGTH,
+  ATTACHMENT_MAX_BYTES,
+  ATTACHMENT_MAX_COUNT,
+  attachmentSizeLabel,
+  isAttachmentAudioMimeType,
+} from "@rakazo/contracts";
 import {
   AttachmentValidationError,
   decodeAttachmentBase64,
@@ -13,7 +19,7 @@ import {
 import type { PrismaClient } from "@rakazo/db";
 import { IsolationError, Prisma, withResolvedArtifactVersion } from "@rakazo/db";
 
-function adapterContext(actor: Actor, botId: string, operationId: string) {
+function adapterContext(actor: ArtifactOwner, botId: string, operationId: string) {
   return {
     operationId,
     traceId: operationId,
@@ -28,6 +34,7 @@ export async function createOwnedArtifact(
   deps: {
     prisma: PrismaClient;
     artifacts: ArtifactStore;
+    maxUploadSizeBytes?: number;
   },
   actor: Actor,
   input: {
@@ -37,18 +44,90 @@ export async function createOwnedArtifact(
     description?: string;
     mimeType: string;
     contentBase64: string;
+    clientNonce?: string;
   },
 ) {
+  const replayed = await findReplayedArtifact(deps.prisma, actor, input);
+  if (replayed) return createdArtifact(replayed);
+  const inferredType = inferAttachmentMimeType(input.name, input.mimeType);
   const mimeType =
-    inferAttachmentMimeType(input.name, input.mimeType) === "application/zip"
-      ? "application/zip"
+    inferredType && (inferredType === "application/zip" || isAttachmentAudioMimeType(inferredType))
+      ? inferredType
       : input.mimeType;
   validateAttachmentMimeType(mimeType);
-  const bytes = decodeAttachmentBase64(input.contentBase64);
+  const bytes = decodeAttachmentBase64(input.contentBase64, deps.maxUploadSizeBytes);
+  return storeOwnedArtifact(deps, actor, { ...input, mimeType, bytes });
+}
+
+export async function storeInboundAttachment(
+  deps: {
+    prisma: PrismaClient;
+    artifacts: ArtifactStore;
+    maxUploadSizeBytes?: number;
+  },
+  owner: ArtifactOwner,
+  input: {
+    botId: string;
+    attachment: MessagingInboundAttachment;
+    clientNonce: string;
+    downloadDeadline?: number;
+  },
+) {
+  const replayed = await findReplayedArtifact(deps.prisma, owner, input);
+  if (replayed) return createdArtifact(replayed);
+  const { attachment } = input;
+  const name = attachment.name.slice(0, ARTIFACT_NAME_MAX_LENGTH);
+  const mimeType = inferAttachmentMimeType(name, attachment.mimeType) ?? attachment.mimeType;
+  validateAttachmentMimeType(mimeType);
+  const maxBytes = deps.maxUploadSizeBytes ?? ATTACHMENT_MAX_BYTES;
+  const tooLarge = new AttachmentValidationError(
+    `Attachment exceeds the ${attachmentSizeLabel(maxBytes)} limit`,
+  );
+  if ((attachment.size ?? 0) > maxBytes) throw tooLarge;
+  const timeoutMs = Math.min(2_000, (input.downloadDeadline ?? Infinity) - Date.now());
+  if (timeoutMs <= 0) throw new AttachmentValidationError("Attachment download timed out");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new AttachmentValidationError("Attachment download timed out")),
+      timeoutMs,
+    );
+  });
+  const bytes = await Promise.race([
+    Promise.resolve().then(() => attachment.fetch()),
+    timeout,
+  ]).finally(() => clearTimeout(timer));
+  if (bytes.byteLength === 0) throw new AttachmentValidationError("Attachment content is empty");
+  if (bytes.byteLength > maxBytes) throw tooLarge;
+  return storeOwnedArtifact(deps, owner, {
+    botId: input.botId,
+    name,
+    mimeType,
+    bytes,
+    clientNonce: input.clientNonce,
+  });
+}
+
+type ArtifactOwner = Pick<Actor, "spaceId" | "userId">;
+
+async function storeOwnedArtifact(
+  deps: { prisma: PrismaClient; artifacts: ArtifactStore },
+  actor: ArtifactOwner,
+  input: {
+    botId: string;
+    groupId?: string;
+    name: string;
+    description?: string;
+    mimeType: string;
+    bytes: Uint8Array;
+    clientNonce?: string;
+  },
+) {
+  const { mimeType, bytes } = input;
   const context = adapterContext(actor, input.botId, `artifact-create:${input.botId}`);
   const stored = await deps.artifacts.put({ name: input.name, mimeType, bytes }, context);
   const hash = createHash("sha256").update(bytes).digest("hex");
-  const row = await withResolvedArtifactVersion(
+  const { row, replay } = await withResolvedArtifactVersion(
     deps.prisma,
     {
       spaceId: actor.spaceId,
@@ -57,8 +136,11 @@ export async function createOwnedArtifact(
       groupId: input.groupId,
       name: input.name,
     },
-    (tx, { rootArtifactId, version }) =>
-      tx.artifact.create({
+    async (tx, { rootArtifactId, version }) => {
+      // A retry of the same upload has the same name and target, so it waits on the same lock.
+      const raced = await findReplayedArtifact(tx, actor, input);
+      if (raced) return { row: raced, replay: true };
+      const created = await tx.artifact.create({
         data: {
           spaceId: actor.spaceId,
           userId: actor.userId,
@@ -72,12 +154,39 @@ export async function createOwnedArtifact(
           storageKey: stored.id,
           rootArtifactId,
           version,
+          clientNonce: input.clientNonce,
         },
-      }),
+      });
+      return { row: created, replay: false };
+    },
   ).catch(async (error) => {
     await deps.artifacts.remove(stored.id, context).catch(() => undefined);
     throw error;
   });
+  if (replay) await deps.artifacts.remove(stored.id, context).catch(() => undefined);
+  return createdArtifact(row);
+}
+
+/** The artifact an earlier upload with this nonce created; a nonce reused for another chat is refused. */
+async function findReplayedArtifact(
+  db: Pick<Prisma.TransactionClient, "artifact">,
+  actor: ArtifactOwner,
+  input: { botId: string; groupId?: string; clientNonce?: string },
+) {
+  if (!input.clientNonce) return null;
+  const row = await db.artifact.findFirst({
+    where: { spaceId: actor.spaceId, userId: actor.userId, clientNonce: input.clientNonce },
+  });
+  if (!row) return null;
+  // A group upload is stored under whichever member bot was first, which can change between retries.
+  const sameTarget = input.groupId
+    ? row.groupId === input.groupId
+    : row.botId === input.botId && row.groupId === null;
+  if (!sameTarget) throw new IsolationError();
+  return row;
+}
+
+function createdArtifact(row: Prisma.ArtifactGetPayload<Record<string, never>>) {
   return {
     id: row.id,
     botId: row.botId,

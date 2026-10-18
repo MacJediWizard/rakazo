@@ -17,11 +17,6 @@ msgstr ""
 msgid " (unread)"
 msgstr " (okunmadı)"
 
-#. placeholder {0}: group.entries.length
-#: src/pages/ModelSettingsOverlay.tsx
-msgid "{0, plural, one {# model} other {# models}}"
-msgstr "{0, plural, one {# model} other {# model}}"
-
 #. placeholder {0}: Math.ceil(oauth.expiresInSeconds / 60)
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/Onboarding.tsx
@@ -40,9 +35,10 @@ msgid "{0} (max {ATTACHMENT_MAX_COUNT} attachments)"
 msgstr "{0} (en fazla {ATTACHMENT_MAX_COUNT} ek)"
 
 #. placeholder {0}: file.name
+#. placeholder {1}: attachmentSizeLabel(attachmentMaxBytes(bootstrapMe))
 #: src/pages/Shell.tsx
-msgid "{0} (over 10 MiB)"
-msgstr "{0} (10 MiB üzeri)"
+msgid "{0} (over {1})"
+msgstr "{0} ({1} üzeri)"
 
 #. placeholder {0}: preset.n
 #: src/pages/RoutineSchedule.tsx
@@ -157,6 +153,86 @@ msgstr "{name} çalışmasını tamamladı"
 msgid "{name} stopped"
 msgstr "{name} durduruldu"
 
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} could not find the requested model."
+msgstr "{provider} istenen modeli bulamadı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} is rate limiting requests. Try again shortly."
+msgstr "{provider} istek hızını sınırlıyor. Kısa bir süre sonra tekrar deneyin."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} key hit its daily limit."
+msgstr "{provider} için günlük anahtar sınırına ulaşıldı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} key hit its limit."
+msgstr "{provider} için anahtar sınırına ulaşıldı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} key hit its monthly limit."
+msgstr "{provider} için aylık anahtar sınırına ulaşıldı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} key hit its weekly limit."
+msgstr "{provider} için haftalık anahtar sınırına ulaşıldı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} reached its credit limit."
+msgstr "{provider} için kredi sınırına ulaşıldı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} reached its daily credit limit."
+msgstr "{provider} için günlük kredi sınırına ulaşıldı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} reached its daily spending limit."
+msgstr "{provider} için günlük harcama sınırına ulaşıldı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} reached its monthly credit limit."
+msgstr "{provider} için aylık kredi sınırına ulaşıldı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} reached its monthly spending limit."
+msgstr "{provider} için aylık harcama sınırına ulaşıldı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} reached its spending limit."
+msgstr "{provider} için harcama sınırına ulaşıldı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} reached its weekly credit limit."
+msgstr "{provider} için haftalık kredi sınırına ulaşıldı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} reached its weekly spending limit."
+msgstr "{provider} için haftalık harcama sınırına ulaşıldı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} rejected the API key. Check your connection settings."
+msgstr "{provider} API anahtarını reddetti. Bağlantı ayarlarınızı kontrol edin."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{provider} took too long to respond. Try again."
+msgstr "{provider} çok geç yanıt verdi. Tekrar deneyin."
+
 #: src/components/teach/TeachRecordingChrome.tsx
 msgid "{remaining} left · bot is watching, not acting"
 msgstr "{remaining} kaldı · bot yalnızca izliyor"
@@ -176,6 +252,11 @@ msgstr ""
 #: src/components/ToolActivityDisclosure.tsx
 msgid "{stepCount, plural, one {Working… · # tool} other {Working… · # tools}}"
 msgstr ""
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "{summary} Resets {date}."
+msgstr "{summary} Sıfırlanma tarihi: {date}."
 
 #: src/pages/ActivityList.tsx
 msgid "{title}, {label}"
@@ -524,6 +605,10 @@ msgstr "API anahtarı üstbilgisi"
 msgid "Appearance"
 msgstr "Görünüm"
 
+#: src/components/AskCard.tsx
+msgid "Apply"
+msgstr "Uygula"
+
 #: src/components/teach/SkillDraftCard.tsx
 msgid "Approval boundaries"
 msgstr "Onay sınırları"
@@ -790,6 +875,10 @@ msgstr "Yerleşik"
 msgid "Can't reach the server."
 msgstr "Sunucuya ulaşılamıyor."
 
+#: src/pages/ModelSettingsOverlay.tsx
+msgid "Can't read images"
+msgstr "Görselleri okuyamaz"
+
 #: src/components/AskCard.tsx
 #: src/components/ComputerMaintenanceActions.tsx
 #: src/components/ComputerUpdateProgress.tsx
@@ -852,10 +941,6 @@ msgstr "Grafik çizilemedi: {error}"
 
 #: src/pages/MessagingSettingsOverlay.tsx
 msgid "Chat apps"
-msgstr ""
-
-#: src/pages/AccountSettingsOverlay.tsx
-msgid "Chat apps, group channels, and agent connections."
 msgstr ""
 
 #: src/pages/Shell.tsx
@@ -922,10 +1007,6 @@ msgstr "Yeni bir parola seçin"
 #: src/pages/shell/avatar-studio-popover.tsx
 msgid "Choose file"
 msgstr "Dosya seç"
-
-#: src/pages/ModelSettingsOverlay.tsx
-msgid "Choose which connected model Rakazo uses."
-msgstr "Rakazo'nun hangi bağlı modeli kullanacağını seç."
 
 #: src/pages/shell/dialogs.tsx
 msgid "Clear"
@@ -1149,10 +1230,6 @@ msgstr "Bağlan"
 msgid "Connect a model"
 msgstr "Model bağla"
 
-#: src/pages/ModelBackupsSettings.tsx
-msgid "Connect a provider to add backups."
-msgstr "Yedek eklemek için bir sağlayıcı bağlayın."
-
 #: src/pages/ModelSettingsOverlay.tsx
 msgid "Connect API key"
 msgstr "API anahtarıyla bağlan"
@@ -1169,10 +1246,6 @@ msgstr "“{name}” MCP sunucusunu bağla"
 msgid "Connect OAuth"
 msgstr "OAuth ile bağlan"
 
-#: src/pages/ModelSettingsOverlay.tsx
-msgid "Connect this provider to use it as your personal model."
-msgstr "Kişisel modelin olarak kullanmak için bu sağlayıcıyı bağla."
-
 #: src/pages/PluginsOverlay.tsx
 msgid "Connect Treg"
 msgstr "Treg'i bağla"
@@ -1186,21 +1259,10 @@ msgstr "Treg'i bağla"
 msgid "Connected"
 msgstr "Bağlandı"
 
-#. placeholder {0}: credential.label
-#: src/pages/ModelSettingsOverlay.tsx
-msgid "Connected · {0}"
-msgstr "Bağlı · {0}"
-
 #. placeholder {0}: selected.name
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Connected {0}."
 msgstr "{0} bağlandı."
-
-#. placeholder {0}: selected.label
-#. placeholder {0}: selectedLabelRef.current ?? "this model"
-#: src/pages/ModelSettingsOverlay.tsx
-msgid "Connected and using {0}."
-msgstr "Bağlandı, {0} kullanılıyor."
 
 #: src/pages/shell/message-cards.tsx
 msgid "Connected. Its tools are available from your next message."
@@ -1518,6 +1580,10 @@ msgstr ""
 msgid "Could not load voice settings"
 msgstr "Ses ayarları yüklenemedi"
 
+#: src/lib/sign-out.ts
+msgid "Could not log out. Try again."
+msgstr "Çıkış yapılamadı. Tekrar deneyin."
+
 #: src/pages/BillingSettingsPanel.tsx
 #: src/pages/Paywall.tsx
 msgid "Could not open billing"
@@ -1596,6 +1662,7 @@ msgstr ""
 
 #: src/pages/ExternalConversationSettings.tsx
 #: src/pages/KnowledgeSection.tsx
+#: src/pages/Shell.tsx
 #: src/pages/shell/bot-panel.tsx
 msgid "Could not save"
 msgstr "Kaydedilemedi"
@@ -1946,6 +2013,10 @@ msgstr ""
 msgid "Desktop update"
 msgstr ""
 
+#: src/pages/Shell.tsx
+msgid "Details"
+msgstr "Ayrıntılar"
+
 #: src/components/integrations/IntegrationSetup.tsx
 msgid "Direct MCP"
 msgstr ""
@@ -1976,15 +2047,20 @@ msgstr ""
 msgid "Disconnecting…"
 msgstr "Bağlantı kesiliyor…"
 
+#: src/components/AskCard.tsx
 #: src/components/ComputerUpdateProgress.tsx
 #: src/components/teach/TeachComputerOverlay.tsx
 #: src/pages/shell/message-cards.tsx
 msgid "Dismiss"
-msgstr ""
+msgstr "Kapat"
 
 #: src/pages/Shell.tsx
 msgid "Dismiss error"
 msgstr ""
+
+#: src/components/AskCard.tsx
+msgid "Dismissed"
+msgstr "Kapatıldı"
 
 #: src/pages/shell/message-cards.tsx
 msgid "Dismissed. Reconnect anytime from MCP settings."
@@ -2059,6 +2135,10 @@ msgstr "Çoğalt"
 #: src/pages/shell/bot-panel.tsx
 msgid "e.g. Hivenet Agent, Presales, Timesheets bot"
 msgstr "örn. Hivenet Agent, Presales, puantaj botu"
+
+#: src/components/AskCard.tsx
+msgid "Edit"
+msgstr "Düzenle"
 
 #: src/components/AskCard.tsx
 msgid "Edit first"
@@ -2219,9 +2299,10 @@ msgstr "Başarısız oldu."
 msgid "Failure handling"
 msgstr "Hata yönetimi"
 
+#. placeholder {0}: attachmentSizeLabel(getMaxUploadSizeBytes())
 #: src/components/computer/FilesApp.tsx
-msgid "File is too large to upload."
-msgstr ""
+msgid "File exceeds the {0} upload limit."
+msgstr "Dosya {0} yükleme sınırını aşıyor."
 
 #: src/components/computer/ComputerWorkspace.tsx
 msgid "Files"
@@ -2377,7 +2458,7 @@ msgstr "Merhaba, yanıtları sesli okuduğumda böyle duyulacağım."
 msgid "Hide bots"
 msgstr ""
 
-#: src/pages/Auth.tsx
+#: src/components/I18nBootstrap.tsx
 msgid "Hide password"
 msgstr ""
 
@@ -2464,6 +2545,19 @@ msgstr "Instance API anahtarı"
 #: src/pages/RoutineEditor.tsx
 msgid "Instruction"
 msgstr "Talimat"
+
+#: src/components/InstructionSettings.tsx
+msgid "Instruction history"
+msgstr "Talimat geçmişi"
+
+#: src/components/AskCard.tsx
+#: src/components/InstructionSettings.tsx
+msgid "Instructions"
+msgstr "Talimatlar"
+
+#: src/components/AskCard.tsx
+msgid "Instructions updated"
+msgstr "Talimatlar güncellendi"
 
 #: src/pages/PluginsOverlay.tsx
 msgid "Integration domain"
@@ -2684,10 +2778,6 @@ msgstr "MCP sunucularını yönet"
 #: src/pages/AccountSettingsOverlay.tsx
 msgid "Manage messaging settings"
 msgstr ""
-
-#: src/pages/MemorySettingsOverlay.tsx
-msgid "Manage the Space semantic memory provider."
-msgstr "Çalışma alanının semantik hafıza sağlayıcısını yönet."
 
 #: src/pages/PluginsOverlay.tsx
 msgid "Manual"
@@ -3375,6 +3465,10 @@ msgstr "Listeden bir model seç veya bu uç noktanın sunduğu bir model kimliğ
 msgid "Pin"
 msgstr "Sabitle"
 
+#: src/components/ArtifactFileCard.tsx
+msgid "Play {name}"
+msgstr "{name} dosyasını oynat"
+
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Playing…"
 msgstr "Çalınıyor…"
@@ -3562,6 +3656,10 @@ msgstr "Kontrolü bırak"
 msgid "Release interrupted computer?"
 msgstr ""
 
+#: src/components/InstructionSettings.tsx
+msgid "Reload"
+msgstr "Yeniden yükle"
+
 #: src/components/ApprovalRulesSettings.tsx
 #: src/pages/ModelBackupsSettings.tsx
 #: src/pages/PluginsOverlay.tsx
@@ -3706,6 +3804,7 @@ msgstr "Paneli yeniden boyutlandır"
 msgid "Restart to update"
 msgstr ""
 
+#: src/components/InstructionSettings.tsx
 #: src/pages/Shell.tsx
 msgid "Restore"
 msgstr "Geri yükle"
@@ -3717,6 +3816,10 @@ msgstr "Son kaydedilen çalışma alanını geri yükleyin."
 #: src/components/ComputerMaintenanceActions.tsx
 msgid "Restore the last saved workspace. Unsaved work on the computer is lost."
 msgstr ""
+
+#: src/components/AskCard.tsx
+msgid "Restored"
+msgstr "Geri yüklendi"
 
 #: src/components/ComputerUpdateProgress.tsx
 msgid "Restoring your workspace"
@@ -3830,10 +3933,6 @@ msgstr "Yedekleri kaydet"
 
 #: src/pages/shell/bot-credentials.tsx
 msgid "Save credential"
-msgstr ""
-
-#: src/pages/ModelSettingsOverlay.tsx
-msgid "Save limits"
 msgstr ""
 
 #: src/pages/shell/bot-credentials.tsx
@@ -3972,6 +4071,10 @@ msgstr "Gönder"
 msgid "Send reset link"
 msgstr "Sıfırlama bağlantısı gönder"
 
+#: src/pages/AccountSettingsOverlay.tsx
+msgid "Send with Enter"
+msgstr "Enter ile gönder"
+
 #: src/components/AskCard.tsx
 msgid "Sending…"
 msgstr "Gönderiliyor…"
@@ -4031,7 +4134,7 @@ msgid "Shared"
 msgstr "Ortak"
 
 #: src/pages/shell/dialogs.tsx
-msgid "Shared chat with 2-6 bots. They all reply in the same thread."
+msgid "Shared chat with {GROUP_MEMBER_MIN}-{GROUP_MEMBER_MAX} bots. They all reply in the same thread."
 msgstr ""
 
 #: src/pages/KnowledgeSection.tsx
@@ -4062,7 +4165,7 @@ msgstr ""
 msgid "Show more"
 msgstr "Daha fazla göster"
 
-#: src/pages/Auth.tsx
+#: src/components/I18nBootstrap.tsx
 msgid "Show password"
 msgstr ""
 
@@ -4242,10 +4345,6 @@ msgstr "Durduruldu."
 msgid "Stored encrypted"
 msgstr "Şifreli saklanıyor"
 
-#: src/pages/ModelSettingsOverlay.tsx
-msgid "Stored securely. Never shown here."
-msgstr "Güvenle saklanır. Burada gösterilmez."
-
 #: src/pages/AccountSettingsOverlay.tsx
 msgid "Stream replies"
 msgstr "Yanıtları akışla göster"
@@ -4352,6 +4451,11 @@ msgstr ""
 #: src/lib/model-connection-preflight.ts
 msgid "The connection timed out."
 msgstr "Bağlantı zaman aşımına uğradı."
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "The model provider returned an error."
+msgstr "Model sağlayıcısı bir hata döndürdü."
 
 #: src/lib/model-connection-preflight.ts
 msgid "The provider is rate-limiting requests."
@@ -4545,6 +4649,10 @@ msgstr "Atanmamış"
 msgid "Unavailable"
 msgstr ""
 
+#: src/components/AskCard.tsx
+msgid "Undo"
+msgstr "Geri al"
+
 #: src/pages/PluginsOverlay.tsx
 msgid "Uninstall"
 msgstr ""
@@ -4595,6 +4703,10 @@ msgstr ""
 #: src/components/SoftwareUpdateSection.tsx
 msgid "Update finished with errors"
 msgstr ""
+
+#: src/components/AskCard.tsx
+msgid "Update instructions?"
+msgstr "Talimatlar güncellensin mi?"
 
 #: src/components/ComputerUpdateProgress.tsx
 msgid "Update progress"
@@ -4829,13 +4941,33 @@ msgstr "Bu pencereyi kapatabilirsin."
 msgid "You have control"
 msgstr "Kontrol sende"
 
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "Your Anthropic"
+msgstr "Anthropic sağlayıcınız"
+
 #: src/pages/Auth.tsx
 msgid "Your email address"
 msgstr "E-posta adresin"
 
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "Your model provider"
+msgstr "Model sağlayıcınız"
+
 #: src/pages/Auth.tsx
 msgid "Your name"
 msgstr "Adın"
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "Your OpenAI"
+msgstr "OpenAI sağlayıcınız"
+
+#. js-lingui-explicit-id
+#: src/lib/run-error.ts
+msgid "Your OpenRouter"
+msgstr "OpenRouter sağlayıcınız"
 
 #: src/pages/Welcome.tsx
 msgid "Your team of always-on agents<0/>that you can give real work to."

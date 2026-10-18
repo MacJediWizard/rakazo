@@ -32,6 +32,7 @@ const fakeAgentState = vi.hoisted(() => ({
   abortCount: 0,
   tools: [] as Array<{
     name: string;
+    executionMode?: string;
     prepareArguments?: (args: unknown) => Record<string, unknown>;
     execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
   }>,
@@ -419,6 +420,34 @@ const shellTool = {
   inputSchema: { type: "object", properties: { command: { type: "string" } } },
 };
 
+const scheduleCreateTool: ConnectorTool = {
+  name: "schedule_create",
+  description: "Create a reminder or recurring job for this bot.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: { type: "string" },
+      prompt: { type: "string" },
+      delayMinutes: { type: "number" },
+    },
+  },
+};
+
+const scheduleListTool: ConnectorTool = {
+  name: "schedule_list",
+  description: "List this bot's active and inactive schedules (routines).",
+  inputSchema: { type: "object", properties: {} },
+};
+
+const scheduleCancelTool: ConnectorTool = {
+  name: "schedule_cancel",
+  description: "Cancel a schedule by routineId or exact name.",
+  inputSchema: {
+    type: "object",
+    properties: { routineId: { type: "string" }, name: { type: "string" } },
+  },
+};
+
 const previousMaxToolCalls = process.env.MAX_TOOL_CALLS_PER_TURN;
 
 describe("Pi connector tool dispatch", () => {
@@ -749,6 +778,44 @@ describe("Pi connector tool dispatch", () => {
       { connectorId: "destination", toolName: "destination.write" },
       { onShellStillRunning: expect.any(Function) },
     );
+  });
+
+  it("runs schedule tools sequentially so a list in the same turn sees a create", async () => {
+    const executeTool = vi.fn(async () => ({ ok: true }));
+    const runtime = new PiAgentRuntime();
+
+    for await (const _event of runtime.run(
+      {
+        botId: "b",
+        threadId: "t",
+        runId: "r",
+        prompt: "remind me in ten minutes",
+        instructions: "Use schedule_create then schedule_list.",
+        history: [],
+        tools: [scheduleCreateTool, scheduleListTool, scheduleCancelTool, destinationTool],
+        model: { provider: "test", id: "dispatch-test-model" },
+        executeTool,
+      },
+      {
+        operationId: "1",
+        traceId: "1",
+        spaceId: "w",
+        userId: "u",
+        signal: new AbortController().signal,
+      },
+    )) {
+      // Exhaust the runtime event stream so tool dispatch completes.
+    }
+
+    const modes = new Map(
+      fakeAgentState.tools.map((tool) => [tool.name, tool.executionMode ?? "default"]),
+    );
+    // A concurrent batch can read the routine list before schedule_create writes
+    // the row, so the bot reports "no schedules" for a reminder it just made.
+    expect(modes.get("schedule_create")).toBe("sequential");
+    expect(modes.get("schedule_list")).toBe("sequential");
+    expect(modes.get("schedule_cancel")).toBe("sequential");
+    expect(modes.get("destination_write")).toBe("default");
   });
 
   it("does not claim a tool-only turn finished work the model never described", async () => {
@@ -1974,6 +2041,51 @@ describe("Pi connector tool dispatch", () => {
     expect(result.content[0]).toEqual({ type: "text", text: first });
     expect(result.content[1]).toEqual(image);
     expect(result.content[2]).toEqual({ type: "text", text: "bbbbb…" });
+  });
+
+  it("delivers a skill read larger than the tool result bound verbatim", async () => {
+    const skill = {
+      name: "large-skill",
+      description: "Large skill",
+      source: "user",
+      readOnly: false,
+      content: `---\nname: large-skill\n---\n${"1. Step kept for skill_update.\n".repeat(600)}`,
+    };
+    fakeAgentState.invoke = { name: "skill_read", args: { name: skill.name } };
+    const runtime = new PiAgentRuntime();
+
+    for await (const _event of runtime.run(
+      {
+        botId: "b",
+        threadId: "t",
+        runId: "large-skill",
+        prompt: "edit the skill",
+        instructions: "Read the skill before updating it.",
+        history: [],
+        tools: [
+          {
+            name: "skill_read",
+            description: "Load a skill by exact name",
+            inputSchema: { type: "object", properties: { name: { type: "string" } } },
+          },
+        ],
+        model: { provider: "test", id: "dispatch-test-model" },
+        executeTool: vi.fn(async () => skill),
+      },
+      {
+        operationId: "large-skill",
+        traceId: "large-skill",
+        spaceId: "w",
+        userId: "u",
+        signal: new AbortController().signal,
+      },
+    )) {
+      // Exhaust so the fake agent executes the tool.
+    }
+
+    const result = fakeAgentState.toolResult as { content: Array<{ type: string; text: string }> };
+    expect(result.content[0]!.text.length).toBeGreaterThan(TOOL_RESULT_TEXT_LIMIT);
+    expect(JSON.parse(result.content[0]!.text)).toEqual(skill);
   });
 
   it("serialises object content instead of writing [object Object] for write_file", async () => {

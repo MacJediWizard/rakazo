@@ -5,9 +5,11 @@ import { createRouterClient } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
 import type { ManagedConnectorProvider } from "@rakazo/adapter-kit";
 import { SecretStoreUnavailableError } from "@rakazo/adapter-kit";
+import * as adapters from "@rakazo/adapters";
 import {
   COMPUTER_SCREEN_UNAVAILABLE,
   CodexCatalogCache,
+  ComputerBusyError,
   ComputerScreenUnavailableError,
   EncryptedSecretStore,
   IntegrationProviderSettings,
@@ -141,23 +143,26 @@ describe("account preferences", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
-  it("coerces unknown stored avatar styles to robot on me", async () => {
-    const { actor, handler } = preferencesDeps("custom-cdn");
+  it.each(["robot", "organic", "custom-cdn"])(
+    "returns the stored style or organic fallback for %s",
+    async (style) => {
+      const { actor, handler } = preferencesDeps(style);
 
-    const { response } = await handler.handle(
-      new Request("http://127.0.0.1/rpc/me", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ json: null }),
-      }),
-      { prefix: "/rpc", context: { actor } },
-    );
+      const { response } = await handler.handle(
+        new Request("http://127.0.0.1/rpc/me", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ json: null }),
+        }),
+        { prefix: "/rpc", context: { actor } },
+      );
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
-      json: expect.objectContaining({ avatarStyle: "robot" }),
-    });
-  });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        json: expect.objectContaining({ avatarStyle: style === "robot" ? "robot" : "organic" }),
+      });
+    },
+  );
 });
 
 describe("billing", () => {
@@ -215,6 +220,7 @@ describe("billing", () => {
 describe("model setup gate", () => {
   function modelGateDeps(options: {
     agentRuntime: string;
+    maxUploadSizeBytes?: number;
     deploymentModelConfigured?: boolean;
     deploymentModelHostCredentials?: boolean;
     deploymentModelCredentialCipher?: string;
@@ -242,6 +248,7 @@ describe("model setup gate", () => {
       prisma,
       env: {
         agentRuntime: options.agentRuntime,
+        maxUploadSizeBytes: options.maxUploadSizeBytes,
         defaultProvider: "openrouter",
         defaultModel: "test-model",
         deploymentModelConfigured: options.deploymentModelConfigured,
@@ -272,6 +279,18 @@ describe("model setup gate", () => {
     );
     return response;
   }
+
+  it.each([undefined, 25 * 1024 * 1024])(
+    "advertises the effective upload limit in me (%s)",
+    async (maxUploadSizeBytes) => {
+      const { actor, handler } = modelGateDeps({ agentRuntime: "scripted", maxUploadSizeBytes });
+      const response = await call(handler, actor, "me", null);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        json: { maxUploadSizeBytes: maxUploadSizeBytes ?? 10 * 1024 * 1024 },
+      });
+    },
+  );
 
   it("refuses to start a run when no model is configured", async () => {
     const { actor, handler } = modelGateDeps({ agentRuntime: "pi" });
@@ -1520,8 +1539,12 @@ describe("computer terminal and file transfer", () => {
     controlBotId: "bot-1",
   };
 
-  function setup(computer: Record<string, unknown> = {}) {
+  function setup(computer: Record<string, unknown> = {}, maxUploadSizeBytes?: number) {
     const sandbox = {
+      execute: vi.fn(async function* () {
+        yield { type: "exit" as const, code: 0 };
+      }),
+      listFiles: vi.fn().mockResolvedValue([]),
       connectTerminal: vi.fn().mockResolvedValue({
         url: "https://screen.example/vnc.html?path=websockify%3Ftoken%3Dterminal-1",
       }),
@@ -1559,6 +1582,7 @@ describe("computer terminal and file transfer", () => {
       sandbox,
       jobs: { enqueue: vi.fn().mockResolvedValue(undefined) },
       env: {
+        maxUploadSizeBytes,
         webOrigin: "http://127.0.0.1:5173",
         screenProxySecret: "fake-test-secret",
         sandboxProvider: "docker",
@@ -1579,6 +1603,73 @@ describe("computer terminal and file transfer", () => {
     };
     return { sandbox, prisma, call };
   }
+
+  it("prepares an unused bot's folders before listing a running Team Computer", async () => {
+    const { sandbox, call } = setup();
+    let prepared = false;
+    sandbox.execute.mockImplementation(async function* () {
+      prepared = true;
+      yield { type: "exit" as const, code: 0 };
+    });
+    sandbox.listFiles.mockImplementation(async () => {
+      if (!prepared) throw new Error("workspace folder does not exist");
+      return [];
+    });
+
+    await expect(call("files", { path: "" })).resolves.toEqual({
+      status: 200,
+      body: { json: [] },
+    });
+    expect(sandbox.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "sandbox-ref-1" }),
+      { argv: ["mkdir", "-p", "shared", "bots/bot-1"] },
+      expect.anything(),
+    );
+    expect(sandbox.listFiles).toHaveBeenCalledWith(
+      expect.anything(),
+      "bots/bot-1",
+      expect.anything(),
+    );
+  });
+
+  it("prepares the bot's folders when boot reuses an already running Team Computer", async () => {
+    const { sandbox, call } = setup();
+    await expect(call("boot", {})).resolves.toMatchObject({ status: 200 });
+    expect(sandbox.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "sandbox-ref-1" }),
+      { argv: ["mkdir", "-p", "shared", "bots/bot-1"] },
+      expect.anything(),
+    );
+  });
+
+  it("clears a reclaimed sandbox before boot attempts provisioning again", async () => {
+    const { sandbox, prisma, call } = setup();
+    sandbox.execute.mockImplementation(async function* () {
+      yield await Promise.reject(
+        Object.assign(new Error("Sandbox is probably not running anymore"), {
+          name: "SandboxNotFoundError",
+        }),
+      );
+    });
+    const findUniqueOrThrow = vi.fn().mockRejectedValue(new ComputerBusyError());
+    prisma.computer.findUniqueOrThrow = findUniqueOrThrow;
+
+    await expect(call("boot", {})).resolves.toMatchObject({ status: 409 });
+    expect(prisma.computer.updateMany).toHaveBeenCalledWith({
+      where: { id: "computer-1", providerRef: "sandbox-ref-1" },
+      data: { state: "stopped", providerRef: null },
+    });
+    expect(findUniqueOrThrow).toHaveBeenCalledWith({ where: { id: "computer-1" } });
+  });
+
+  it("does not discard a live sandbox when folder preparation fails", async () => {
+    const { sandbox, prisma, call } = setup();
+    sandbox.execute.mockImplementation(async function* () {
+      yield { type: "exit" as const, code: 1 };
+    });
+    await expect(call("boot", {})).resolves.toMatchObject({ status: 500 });
+    expect(prisma.computer.updateMany).not.toHaveBeenCalled();
+  });
 
   it("opens a terminal only for the user holding this bot's control lease", async () => {
     const released = setup();
@@ -1632,6 +1723,34 @@ describe("computer terminal and file transfer", () => {
       body: { json: { url: null } },
     });
     expect(sandbox.connectTerminal).not.toHaveBeenCalled();
+  });
+
+  it("enforces the configured computer upload limit and advertises it to the sandbox", async () => {
+    const limit = 1024 * 1024;
+    const { call, sandbox } = setup(controlled, limit);
+    await expect(
+      call("uploadFile", {
+        path: "notes.txt",
+        contentBase64: Buffer.alloc(limit + 1).toString("base64"),
+      }),
+    ).resolves.toMatchObject({
+      status: 400,
+      body: { json: { message: "File exceeds the 1 MiB upload limit." } },
+    });
+    expect(sandbox.writeFile).not.toHaveBeenCalled();
+    await expect(
+      call("uploadFile", {
+        path: "notes.txt",
+        contentBase64: Buffer.alloc(limit).toString("base64"),
+      }),
+    ).resolves.toMatchObject({ status: 200 });
+    await call("downloadFile", { path: "notes.txt" });
+    expect(sandbox.readFile).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      { maxBytes: limit },
+    );
   });
 
   it("uploads into the bot workspace only under control", async () => {
@@ -1828,6 +1947,219 @@ describe("interrupted computer reservation release", () => {
       data: { maintenanceId: null, state: "error" },
     });
     expect(order).toEqual(["operation", "computer"]);
+  });
+});
+
+describe("OpenAI-compatible model probes", () => {
+  const actor = {
+    spaceId: "workspace-1",
+    userId: "user-1",
+    email: "user@rakazo.test",
+    isDeploymentOwner: true,
+  } satisfies Actor;
+  const baseUrl = "https://127.0.0.1:8000/v1";
+  const stored = JSON.stringify({ kind: "openai_compatible", baseUrl, apiKey: "fake-saved-key" });
+
+  function fixture(options: { credentialUserId?: string; secretUserId?: string } = {}) {
+    const credential = {
+      id: "cred-1",
+      userId: options.credentialUserId ?? actor.userId,
+      provider: "openai-compatible",
+      secretId: "secret-1",
+    };
+    const credentials = [credential];
+    const findCredential = vi.fn(
+      async ({ where }: { where: { userId: string; provider: string } }) =>
+        where.userId === credential.userId && where.provider === credential.provider
+          ? credential
+          : null,
+    );
+    const findCredentials = vi.fn(
+      async ({ where }: { where: { userId: string; provider: string } }) =>
+        credentials.filter(
+          (candidate) => candidate.userId === where.userId && candidate.provider === where.provider,
+        ),
+    );
+    const findSecret = vi.fn(
+      async ({ where }: { where: { userId: string; id: { in: string[] }; spaceId: null } }) =>
+        credentials
+          .filter(
+            (candidate) =>
+              where.userId === (options.secretUserId ?? candidate.userId) &&
+              where.id.in.includes(candidate.secretId) &&
+              where.spaceId === null,
+          )
+          .map((candidate) => ({ id: candidate.secretId, ciphertext: "fake-ciphertext" })),
+    );
+    const load = vi.fn().mockResolvedValue(stored);
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json({ data: [{ id: "test-model" }] }),
+    );
+    const probe = adapters.probeOpenAiCompatibleModels;
+    vi.spyOn(adapters, "probeOpenAiCompatibleModels").mockImplementation((input, _, signal) =>
+      probe(input, fetch, signal),
+    );
+    const deps = {
+      prisma: {
+        spaceModelPreference: { findFirst: vi.fn().mockResolvedValue(null) },
+        userModelCredential: { findFirst: findCredential, findMany: findCredentials },
+        secret: { findMany: findSecret },
+      },
+      secrets: { load },
+      env: { sandboxProvider: "fake" },
+    } as unknown as RouterDeps;
+    const client = createRouterClient(createRouter(deps), { context: { actor } as never });
+    return { client, fetch, credentials, findCredential, findCredentials, findSecret, load };
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([undefined, "", "   "])("uses the saved key for a blank key %j", async (apiKey) => {
+    const { client, fetch, findSecret, load } = fixture();
+    const response = await client.models.probeOpenAiCompatible({ baseUrl, apiKey });
+    expect(fetch).toHaveBeenCalledWith(
+      new URL(`${baseUrl}/models`),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer fake-saved-key" }),
+      }),
+    );
+    expect(findSecret).toHaveBeenCalledWith({
+      where: { id: { in: ["secret-1"] }, userId: actor.userId, spaceId: null },
+      select: { id: true, ciphertext: true },
+    });
+    expect(load).toHaveBeenCalledWith("fake-ciphertext", "secret-1");
+    expect(response).toEqual({ models: ["test-model"] });
+    expect(JSON.stringify(response)).not.toContain("fake-saved-key");
+  });
+
+  it("uses a typed key without looking up the stored credential", async () => {
+    const { client, fetch, findCredential, findCredentials, findSecret, load } = fixture();
+    await client.models.probeOpenAiCompatible({ baseUrl, apiKey: " fake-typed-key " });
+    expect(fetch).toHaveBeenCalledWith(
+      expect.any(URL),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer fake-typed-key" }),
+      }),
+    );
+    expect(findCredential).not.toHaveBeenCalled();
+    expect(findCredentials).not.toHaveBeenCalled();
+    expect(findSecret).not.toHaveBeenCalled();
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it.each(["different endpoint", "unreadable", "matching endpoint"])(
+    "tries the preferred credential first, then another matching credential when preferred is %s",
+    async (preferred) => {
+      const { client, fetch, credentials, findCredentials, findSecret, load } = fixture();
+      credentials.push({
+        id: "cred-2",
+        userId: actor.userId,
+        provider: "openai-compatible",
+        secretId: "secret-2",
+      });
+      load.mockImplementation(async (_, secretId) => {
+        if (secretId === "secret-2") return stored;
+        if (preferred === "unreadable") throw new Error("Secret unavailable");
+        return JSON.stringify({
+          kind: "openai_compatible",
+          baseUrl: preferred === "matching endpoint" ? baseUrl : "https://127.0.0.2:8000/v1",
+          apiKey: "fake-preferred-key",
+        });
+      });
+
+      await client.models.probeOpenAiCompatible({ baseUrl });
+
+      expect(findCredentials).toHaveBeenCalledWith({
+        where: { userId: actor.userId, provider: "openai-compatible" },
+        orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      });
+      expect(findSecret).toHaveBeenCalledExactlyOnceWith({
+        where: { id: { in: ["secret-1", "secret-2"] }, userId: actor.userId, spaceId: null },
+        select: { id: true, ciphertext: true },
+      });
+      expect(fetch.mock.calls[0]?.[1]?.headers).toHaveProperty(
+        "Authorization",
+        preferred === "matching endpoint" ? "Bearer fake-preferred-key" : "Bearer fake-saved-key",
+      );
+      expect(load.mock.calls.map((call) => call[1])).toEqual(
+        preferred === "matching endpoint" ? ["secret-1"] : ["secret-1", "secret-2"],
+      );
+    },
+  );
+
+  it("never uses another user's matching credential after the preferred endpoint differs", async () => {
+    const { client, fetch, credentials, findSecret, load } = fixture();
+    credentials.push({
+      id: "cred-other",
+      userId: "other-user",
+      provider: "openai-compatible",
+      secretId: "secret-other",
+    });
+    load.mockImplementation(async (_, secretId) =>
+      secretId === "secret-other"
+        ? stored
+        : JSON.stringify({
+            kind: "openai_compatible",
+            baseUrl: "https://127.0.0.2:8000/v1",
+            apiKey: "fake-preferred-key",
+          }),
+    );
+
+    await client.models.probeOpenAiCompatible({ baseUrl });
+
+    expect(findSecret).toHaveBeenCalledExactlyOnceWith({
+      where: { id: { in: ["secret-1"] }, userId: actor.userId, spaceId: null },
+      select: { id: true, ciphertext: true },
+    });
+    expect(load).toHaveBeenCalledExactlyOnceWith("fake-ciphertext", "secret-1");
+    expect(fetch.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
+  });
+
+  it("does not send the saved key to a different endpoint", async () => {
+    const { client, fetch } = fixture();
+    await client.models.probeOpenAiCompatible({ baseUrl: "https://127.0.0.2:8000/v1" });
+    expect(fetch.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
+  });
+
+  it.each([{ credentialUserId: "other-user" }, { secretUserId: "other-user" }])(
+    "does not load another user's credential or secret: %j",
+    async (options) => {
+      const { client, fetch, findCredential, load } = fixture(options);
+      await client.models.probeOpenAiCompatible({ baseUrl });
+      expect(findCredential).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { userId: actor.userId, provider: "openai-compatible" } }),
+      );
+      expect(load).not.toHaveBeenCalled();
+      expect(fetch.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
+    },
+  );
+
+  it.each(["unavailable", "corrupt"])(
+    "falls back when the stored secret is %s",
+    async (failure) => {
+      const { client, fetch, load } = fixture();
+      if (failure === "unavailable") load.mockRejectedValue(new Error("Secret unavailable"));
+      else load.mockResolvedValue('{"kind":"openai_compatible"}');
+      await expect(client.models.probeOpenAiCompatible({ baseUrl })).resolves.toEqual({
+        models: ["test-model"],
+      });
+      expect(fetch.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
+    },
+  );
+
+  it("still rejects saved keys on public HTTP endpoints", async () => {
+    vi.stubEnv("RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC", "1");
+    try {
+      const { client, fetch, load } = fixture();
+      const baseUrl = "http://example.invalid/v1";
+      load.mockResolvedValue(
+        JSON.stringify({ kind: "openai_compatible", baseUrl, apiKey: "fake-saved-key" }),
+      );
+      await expect(client.models.probeOpenAiCompatible({ baseUrl })).rejects.toThrow(/HTTPS/);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
@@ -3144,6 +3476,7 @@ describe("bot model auth on save", () => {
       description: bot.description,
     }));
     const tx = {
+      $queryRaw: vi.fn(async () => []),
       bot: { update: botUpdate },
       thread: { update: vi.fn(async () => ({ nextEventSeq: 2 })) },
       event: { create: vi.fn(async () => ({ seq: 1 })) },

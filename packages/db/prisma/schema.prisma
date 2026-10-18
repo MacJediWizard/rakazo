@@ -30,7 +30,7 @@ model User {
   image                       String?
   createdAt                   DateTime                     @default(now())
   updatedAt                   DateTime                     @updatedAt
-  avatarStyle                 String                       @default("robot")
+  avatarStyle                 String                       @default("organic")
   sessions                    Session[]
   accounts                    Account[]
   members                     Member[]
@@ -399,6 +399,9 @@ model Bot {
   title             String            @default("")
   description       String            @default("")
   instructions      String            @default("")
+  selfUpdateInstructions Boolean @default(false)
+  instructionHistory Json @default("[]")
+  pendingInstructionsRunId String?
   color             String
   notifyOnFinish    Boolean           @default(true)
   pinned            Boolean           @default(false)
@@ -640,6 +643,8 @@ model Run {
   sourceMessage        Message?         @relation("RunSourceMessage", fields: [sourceMessageId], references: [id], onDelete: SetNull)
   routineId            String?
   routine              Routine?         @relation(fields: [routineId], references: [id], onDelete: SetNull)
+  // The failed routine run this run retries. Unique, so a run is retried at most once.
+  retryOfRunId         String?          @unique
   startedAt            DateTime?
   completedAt          DateTime?
   botOutcomeReturnedAt DateTime?
@@ -998,6 +1003,8 @@ model Computer {
   executionLeaseExpiresAt DateTime?
   executionFence          Int                      @default(0)
   screenUrl               String?
+  /// When the computer last started running; bounds how long it can stay up in one stretch.
+  runningSince            DateTime?
   createdAt               DateTime                 @default(now())
   updatedAt               DateTime                 @updatedAt
   bots                    Bot[]
@@ -1049,7 +1056,10 @@ model Artifact {
   rootArtifact   Artifact?  @relation("ArtifactVersions", fields: [rootArtifactId], references: [id], onDelete: Cascade)
   versions       Artifact[] @relation("ArtifactVersions")
   version        Int        @default(1)
+  // Client-chosen per upload so a retried upload that already landed returns this row.
+  clientNonce    String?
 
+  @@unique([spaceId, userId, clientNonce])
   @@index([spaceId, botId])
   @@index([groupId])
   @@index([rootArtifactId])

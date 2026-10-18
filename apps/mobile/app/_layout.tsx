@@ -5,12 +5,11 @@ import {
   RemoteImagesContext,
 } from "@rakazo/chat-ui/native";
 import { DarkTheme, Stack, ThemeProvider } from "expo-router";
-import * as ScreenOrientation from "expo-screen-orientation";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { Platform, View } from "react-native";
+import { Dimensions, Platform, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -39,14 +38,19 @@ import {
 } from "../lib/live-notifications";
 import { native, useMobileTokens, useResolvedAppearance } from "../lib/native";
 import { useNotificationResponses } from "../lib/open-notification";
+import { syncOrientation } from "../lib/orientation";
 import {
   getCachedRemoteImagesEnabled,
   loadRemoteImagesPreference,
   subscribeRemoteImages,
 } from "../lib/remote-images-preference";
 import { loadResponseStreamingPreference } from "../lib/response-streaming";
+import { clearSavedChats } from "../lib/saved-chats";
+import { registerSessionDiskCache } from "../lib/session";
+import { startUnsentSends } from "../lib/unsent-sends";
 
 configureForegroundNotifications();
+registerSessionDiskCache(clearSavedChats);
 // Keep the splash up until the saved appearance applies, so the first frame isn't in the OS scheme.
 void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
@@ -84,10 +88,12 @@ function ChatContentProviders({
 
 export default function Layout() {
   useEffect(() => {
-    // The app is portrait-only; the computer screen unlocks rotation while it is open.
-    void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(
-      () => undefined,
-    );
+    // Screen changes include folding; window resizing must not lock a tablet in split-screen.
+    const subscription = Dimensions.addEventListener("change", () => {
+      void syncOrientation();
+    });
+    void syncOrientation();
+    return () => subscription.remove();
   }, []);
   const { t } = useI18n();
   const insets = useSafeAreaInsets();
@@ -125,6 +131,11 @@ export default function Layout() {
     if (!ready) return;
     // A session revoked or expired on the server ends here, from whichever screen noticed it.
     return subscribeSessionRejected(() => replaceWithSignIn());
+  }, [ready]);
+
+  useEffect(() => {
+    if (!ready) return;
+    return startUnsentSends();
   }, [ready]);
 
   useEffect(() => {

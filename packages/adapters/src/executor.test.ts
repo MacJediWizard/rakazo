@@ -13,6 +13,7 @@ import {
   missingTurnImagesInstruction,
   parseUpdateBotPatch,
   persistentComputerInstruction,
+  REACTION_SILENT_REPLY_GUIDANCE,
   runNotificationsEnabled,
   selectBuiltinToolsForRun,
   settleSteeringAttachmentLoads,
@@ -1024,7 +1025,7 @@ describe("userTurnInstructions", () => {
   const archiveBot =
     "archive_bot safely archives a bot this bot created, and only that bot. Use it when the user asks to remove that bot or when it is finished and unused. The user can restore it or permanently delete it later. confirm_name must exactly match its name.";
   const replyGuidance =
-    "During long work, send a few short progress updates with message_user so the user can see what you are doing. Keep them brief and high-signal (a sentence or two, not a dump). Do not narrate every tool call. Thinking stays private. message_user is capped at 500 characters and will be silently cut off if you exceed it \u2014 never put your final answer, a report, or any long-form deliverable in it. Always put the complete final answer in your normal reply, never split across message_user calls, and never assume a message_user update already delivered your content.";
+    "Send progress updates only when the work will take minutes — long computer tasks or multi-step jobs — never for quick replies and never to announce that you are starting. Even then send at most a few brief updates (a sentence or two each), not one per tool call, and do not narrate routine steps. Thinking stays private. message_user is capped at 500 characters and will be silently cut off if you exceed it \u2014 never put your final answer, a report, or any long-form deliverable in it. Always put the complete final answer in your normal reply, never split across message_user calls, and never assume a message_user update already delivered your content.";
   const stableTail = [
     'For charts and data visualization, use the render_plot tool: it renders bar, line, scatter, histogram, heatmap, faceted and many more chart types from a JSON spec and attaches the PNG to the chat. Call render_plot with {"help": true} before your first chart to read the full guide.',
     "When the user asks you to add or connect an MCP server (and gives you its details), use add_mcp_server. If it uses browser sign-in, an approval card appears in the chat — tell the user to click Authorize on it.",
@@ -1228,6 +1229,29 @@ describe("userTurnInstructions", () => {
     expect(text).toContain("web_search");
     expect(text).toContain("destination_write");
     expect(text).toContain("Always put the complete final answer in your normal reply.");
+  });
+
+  it("keeps the reaction silence rule when message_user is off", () => {
+    const text = userTurnInstructions({
+      ...base,
+      replyGuidance: REACTION_SILENT_REPLY_GUIDANCE,
+      groupContext: undefined,
+      messagingContext: undefined,
+      redactedMemoryContext: undefined,
+      redactedScratchpadContext: undefined,
+      hasHistoricalContext: false,
+      agentEnvironmentInstruction: undefined,
+      botDirectory: undefined,
+      pluginLine: undefined,
+      agentSkillsLine: undefined,
+      taughtSkillsLine: undefined,
+      disabledBuiltinTools: new Set(["message_user"]),
+    })
+      .filter(Boolean)
+      .join("\n");
+    expect(text).toContain("The user reacted with an emoji to your message.");
+    expect(text).toContain("must be exactly NO_RESPONSE.");
+    expect(text).not.toContain("message_user");
   });
 
   it("keeps the credential safeguard when secret tools are off and shell stays on", () => {
@@ -1459,6 +1483,25 @@ describe("createRunExecutor", () => {
       historyCompactedUpToSeq: null,
       includeSemanticRecall: false,
     });
+  });
+
+  it("keeps the current reaction out of history because its target is supplied in the prompt", () => {
+    const messages = [
+      { id: "parent", role: "assistant", content: "Proceed?" },
+      {
+        id: "reaction",
+        role: "user",
+        content: "User reacted with 👍 to <reaction_target>Proceed?</reaction_target>",
+      },
+    ];
+    expect(
+      threadContextForRun(
+        "reaction",
+        { messages, summary: null, historyCompactedUpToSeq: null },
+        false,
+        "reaction",
+      ).messages,
+    ).toEqual([messages[0]]);
   });
 
   it("isolates routine runs from every thread-history source", () => {
