@@ -73,7 +73,7 @@ export function createAxiomSinkFromEnv(
 }
 
 export function createRootLogger(service: string, env: NodeJS.ProcessEnv = process.env): Logger {
-  const optional = [createAxiomSinkFromEnv(env), createSentrySinkFromEnv(env)];
+  const optional = [createAxiomSinkFromEnv(env), createSentrySinkFromEnv(service, env)];
   const logger = createServiceLogger({
     service,
     env,

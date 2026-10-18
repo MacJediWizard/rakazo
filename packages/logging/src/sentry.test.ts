@@ -1,5 +1,6 @@
 import * as Sentry from "@sentry/node";
 import { afterEach, describe, expect, it } from "vitest";
+import { createRootLogger } from "./axiom.js";
 import { createLogger } from "./logger.js";
 import { createSentrySink, createSentrySinkFromEnv, sentryConfigFromEnv } from "./sentry.js";
 
@@ -46,12 +47,28 @@ describe("sentry sink", () => {
     expect(sentryConfigFromEnv({ SENTRY_DSN: DSN, GIT_SHA: "unknown" }).config?.release).toBe(
       undefined,
     );
-    expect(createSentrySinkFromEnv({ SENTRY_DSN: "bad" }).sink).toBeUndefined();
+    expect(createSentrySinkFromEnv("rakazo-api", { SENTRY_DSN: "bad" }).sink).toBeUndefined();
+  });
+
+  it("passes the root logger service to the SDK scope", () => {
+    createRootLogger("rakazo-worker", { SENTRY_DSN: DSN });
+    expect(Sentry.getIsolationScope().getScopeData().tags.service).toBe("rakazo-worker");
+  });
+
+  it("tags exceptions captured outside log writes with the service", async () => {
+    const { events, transport } = recordingTransport();
+    const sink = createSentrySink("rakazo-api", { dsn: DSN }, transport);
+    Sentry.captureException(new Error("unexpected failure"));
+    await sink.flush?.();
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toEqual({ service: "rakazo-api" });
   });
 
   it("reports error logs with the exception chain, tags, and no log context", async () => {
     const { events, transport } = recordingTransport();
     const sink = createSentrySink(
+      "rakazo-worker",
       { dsn: DSN, environment: "prod-acme", release: "abc" },
       transport,
     );
@@ -84,7 +101,7 @@ describe("sentry sink", () => {
 
   it("redacts what it copies out when handed an event directly", async () => {
     const { events, transport } = recordingTransport();
-    const sink = createSentrySink({ dsn: DSN }, transport);
+    const sink = createSentrySink("rakazo-api", { dsn: DSN }, transport);
     sink.write({
       timestamp: new Date().toISOString(),
       level: "error",
@@ -113,7 +130,7 @@ describe("sentry sink", () => {
 
   it("scrubs SDK and scope metadata before sending", async () => {
     const { events, transport } = recordingTransport();
-    const sink = createSentrySink({ dsn: DSN }, transport);
+    const sink = createSentrySink("rakazo-api", { dsn: DSN }, transport);
     Sentry.withScope((scope) => {
       scope.setUser({ id: "private-user", email: "private@example.com" });
       scope.setExtra("content", "private content");
@@ -145,7 +162,7 @@ describe("sentry sink", () => {
     const { events, transport } = recordingTransport();
     const logger = createLogger({
       service: "rakazo-api",
-      sinks: [createSentrySink({ dsn: DSN }, transport)],
+      sinks: [createSentrySink("rakazo-api", { dsn: DSN }, transport)],
     });
     logger.info("started");
     logger.warn("slow");

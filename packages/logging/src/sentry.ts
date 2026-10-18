@@ -46,6 +46,7 @@ export function isValidDsn(dsn: string): boolean {
 }
 
 export function createSentrySink(
+  service: string,
   config: SentryConfig,
   transport?: Sentry.NodeOptions["transport"],
 ): LogSink {
@@ -81,6 +82,7 @@ export function createSentrySink(
     ],
     beforeSend: redactEvent,
   });
+  Sentry.setTag("service", service);
   return {
     write(event: LogEvent) {
       if (event.level !== "error") return;
@@ -107,12 +109,15 @@ export function createSentrySink(
   };
 }
 
-export function createSentrySinkFromEnv(source: NodeJS.ProcessEnv = process.env): {
+export function createSentrySinkFromEnv(
+  service: string,
+  source: NodeJS.ProcessEnv = process.env,
+): {
   sink?: LogSink;
   warning?: string;
 } {
   const { config, warning } = sentryConfigFromEnv(source);
-  return config ? { sink: createSentrySink(config) } : { warning };
+  return config ? { sink: createSentrySink(service, config) } : { warning };
 }
 
 function releaseFromGitSha(sha: string | undefined): string | undefined {
