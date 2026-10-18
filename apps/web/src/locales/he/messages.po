@@ -877,7 +877,7 @@ msgstr "אין גישה לשרת."
 
 #: src/pages/ModelSettingsOverlay.tsx
 msgid "Can't read images"
-msgstr ""
+msgstr "לא ניתן לקרוא תמונות"
 
 #: src/components/AskCard.tsx
 #: src/components/ComputerMaintenanceActions.tsx
@@ -1582,7 +1582,7 @@ msgstr "לא ניתן לטעון את הגדרות הקול"
 
 #: src/lib/sign-out.ts
 msgid "Could not log out. Try again."
-msgstr ""
+msgstr "לא ניתן להתנתק. יש לנסות שוב."
 
 #: src/pages/BillingSettingsPanel.tsx
 #: src/pages/Paywall.tsx
