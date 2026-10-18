@@ -150,6 +150,12 @@ function redactEvent(event: Sentry.ErrorEvent): Sentry.ErrorEvent {
   if (event.message) event.message = redactSensitiveText(event.message);
   for (const value of event.exception?.values ?? []) {
     if (value.value) value.value = redactSensitiveText(value.value);
+    for (const frame of value.stacktrace?.frames ?? []) {
+      if (frame.filename) frame.filename = redactSensitiveText(frame.filename);
+      if (frame.abs_path) frame.abs_path = redactSensitiveText(frame.abs_path);
+      if (frame.module) frame.module = redactSensitiveText(frame.module);
+      delete frame.vars;
+    }
   }
   return event;
 }

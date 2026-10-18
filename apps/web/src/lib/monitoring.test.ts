@@ -130,6 +130,19 @@ describe("browser monitoring", () => {
       message: "Failed for [Redacted]",
       exception: { values: [{ value: "401 Bearer [Redacted] from [Redacted]" }] },
     });
+    expect(
+      options.beforeSend({
+        exception: {
+          values: [
+            { stacktrace: { frames: [{ filename: "https://app.example.com/a.js?token=x#y" }] } },
+          ],
+        },
+      }),
+    ).toEqual({
+      exception: {
+        values: [{ stacktrace: { frames: [{ filename: "https://app.example.com/a.js" }] } }],
+      },
+    });
     expect(options.tracesSampleRate).toBeUndefined();
     expect(options.profilesSampleRate).toBeUndefined();
     expect(options.replaysSessionSampleRate).toBeUndefined();

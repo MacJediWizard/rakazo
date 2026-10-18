@@ -76,6 +76,10 @@ async function loadSentry(fetchImpl: typeof fetch): Promise<typeof SentryReact |
         if (event.message) event.message = scrubText(event.message);
         for (const value of event.exception?.values ?? []) {
           if (value.value) value.value = scrubText(value.value);
+          for (const frame of value.stacktrace?.frames ?? []) {
+            if (frame.filename) frame.filename = stripUrl(frame.filename);
+            if (frame.abs_path) frame.abs_path = stripUrl(frame.abs_path);
+          }
         }
         return event;
       },

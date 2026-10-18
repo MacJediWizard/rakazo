@@ -65,6 +65,17 @@ describe("sentry sink", () => {
     expect(events[0]?.tags).toEqual({ service: "rakazo-api" });
   });
 
+  it("redacts stack frame paths on exceptions the SDK captures directly", async () => {
+    const { events, transport } = recordingTransport();
+    const sink = createSentrySink("rakazo-api", { dsn: DSN }, transport);
+    const error = new Error("unexpected failure");
+    error.stack = "Error: unexpected failure\n    at run (/home/ada@example.com/app/index.js:1:1)";
+    Sentry.captureException(error);
+    await sink.flush?.();
+
+    expect(JSON.stringify(events[0]?.exception)).not.toContain("ada@example.com");
+  });
+
   it("reports error logs with the exception chain, tags, and no log context", async () => {
     const { events, transport } = recordingTransport();
     const sink = createSentrySink(
