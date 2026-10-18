@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/node";
-import { redactBindings, redactSensitiveText } from "./redaction.js";
+import { redactSensitiveText } from "./redaction.js";
 import type { LogEvent, LogSink, SerializedError } from "./types.js";
 
 // Error reporting to any Sentry-protocol collector (GlitchTip, Sentry, Bugsink). Only error-level
@@ -76,7 +76,6 @@ export function createSentrySink(
       Sentry.functionToStringIntegration(),
       Sentry.linkedErrorsIntegration(),
       Sentry.dedupeIntegration(),
-      Sentry.contextLinesIntegration(),
       Sentry.nodeContextIntegration(),
       Sentry.onUncaughtExceptionIntegration(),
     ],
@@ -85,19 +84,17 @@ export function createSentrySink(
   return {
     write(event: LogEvent) {
       if (event.level !== "error") return;
-      const { timestamp: _t, level: _l, "service.name": service, error, ...rest } = event;
-      // The logger already redacts, but a sink can be handed any LogEvent; redact what we copy out.
-      const { message: _m, ...extra } = redactBindings(rest);
+      const { "service.name": service, error } = event;
       const message = redactSensitiveText(event.message);
       Sentry.withScope((scope) => {
         scope.setTag("service", service);
         for (const key of TAG_KEYS) {
-          const value = extra[key];
-          if (typeof value === "string" && value) scope.setTag(key, value);
+          const value = event[key];
+          if (typeof value === "string" && value.length > 0 && value.length <= 200)
+            scope.setTag(key, redactSensitiveText(value));
         }
-        scope.setExtras(extra);
+        scope.setExtra("log.message", message);
         if (error) {
-          scope.setExtra("log.message", message);
           Sentry.captureException(rebuildError(error));
         } else {
           Sentry.captureMessage(message, "error");
@@ -136,6 +133,15 @@ function rebuildError(serialized: SerializedError): Error {
 }
 
 function redactEvent(event: Sentry.ErrorEvent): Sentry.ErrorEvent {
+  delete event.request;
+  delete event.user;
+  delete event.breadcrumbs;
+  event.server_name = undefined;
+  if (event.extra) {
+    const message = event.extra["log.message"];
+    event.extra =
+      typeof message === "string" ? { "log.message": redactSensitiveText(message) } : {};
+  }
   if (event.message) event.message = redactSensitiveText(event.message);
   for (const value of event.exception?.values ?? []) {
     if (value.value) value.value = redactSensitiveText(value.value);

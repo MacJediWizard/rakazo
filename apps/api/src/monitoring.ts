@@ -79,8 +79,8 @@ export function monitoringRoutes(
         body: envelope,
         signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       });
-    } catch (error) {
-      getLogger().warn("browser error report forwarding failed", { error: String(error) });
+    } catch {
+      getLogger().warn("browser error report forwarding failed");
       return c.body(null, 502);
     }
     await upstream.body?.cancel();

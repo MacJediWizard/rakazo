@@ -402,6 +402,14 @@ export async function createApp(
     signupsEnabled: env.signupsEnabled,
     signupAllowlist: env.signupAllowlist,
     email,
+    logger: {
+      level: "error",
+      log: (_level, _message, ...args) =>
+        getLogger().error(
+          "auth.request.failed",
+          args.find((arg) => arg instanceof Error),
+        ),
+    },
     onEmailError: (error) => getLogger().error("transactional email delivery failed", error),
     extraOrigins: MOBILE_AUTH_ORIGINS,
     beforeDeleteUser: async (userId) => {

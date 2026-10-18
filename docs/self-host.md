@@ -342,21 +342,14 @@ regional hostname; `AXIOM_EDGE_URL` must be https and wins when both are set.
 Error reporting to Sentry or a Sentry-compatible collector such as GlitchTip is optional:
 
 - `SENTRY_DSN` reports backend `error` logs, with the exception chain, `service`, and request or job
-  ids as tags. Context is redacted like the log line. Uncaught exceptions are reported before exit.
+  ids as tags. Uncaught exceptions are reported before exit.
 - `SENTRY_BROWSER_DSN` reports web app errors. The browser reads it from `/api/monitoring/config` at
   startup and posts reports to `/api/monitoring/tunnel`; the API forwards only envelopes addressed
   to that DSN. Use a separate project from `SENTRY_DSN`.
 - `SENTRY_ENVIRONMENT` names the deployment. `SENTRY_RELEASE` defaults to the image's `GIT_SHA`.
 
-Neither SDK sends cookies, headers, request bodies, user identity, or console output. An invalid DSN
-logs a warning and stays off.
-
-Published images are minified. The image build uploads hidden source maps when it has the build
-secrets `sentry_auth_token`, `sentry_url`, `sentry_org`, and `sentry_project` (the browser project),
-then deletes the maps. In GitHub Actions these come from the `SENTRY_AUTH_TOKEN`, `SENTRY_URL`,
-`SENTRY_ORG`, and `SENTRY_WEB_PROJECT` repository secrets. The token needs `project:releases` and
-`org:read`. BuildKit does not key its cache on secrets, so local builds that should upload pass a
-new `--build-arg SOURCEMAP_UPLOAD_ID=<any unique value>`.
+Neither SDK sends cookies, headers, request bodies, user identity, console output, or log context.
+Reporting is off without a DSN; an invalid DSN logs a warning and stays off.
 
 Compose passes these into the API, worker, supervisor, and updater. Computer containers and updater
 child commands do not receive them.

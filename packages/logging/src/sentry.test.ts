@@ -49,7 +49,7 @@ describe("sentry sink", () => {
     expect(createSentrySinkFromEnv({ SENTRY_DSN: "bad" }).sink).toBeUndefined();
   });
 
-  it("reports error logs with the exception chain, tags, and redacted extras", async () => {
+  it("reports error logs with the exception chain, tags, and no log context", async () => {
     const { events, transport } = recordingTransport();
     const sink = createSentrySink(
       { dsn: DSN, environment: "prod-acme", release: "abc" },
@@ -57,7 +57,12 @@ describe("sentry sink", () => {
     );
     const logger = createLogger({ service: "rakazo-worker", sinks: [sink] });
     const error = new Error("run failed", { cause: new TypeError("bad input") });
-    logger.error("job crashed", error, { jobId: "j1", apiKey: "sk-secret" });
+    logger.error("job crashed", error, {
+      jobId: "j1",
+      apiKey: "sk-secret",
+      content: "private message",
+      "user.id": "u1",
+    });
     await logger.flush();
 
     expect(events).toHaveLength(1);
@@ -67,9 +72,11 @@ describe("sentry sink", () => {
       release: "abc",
       level: "error",
       tags: { service: "rakazo-worker", jobId: "j1" },
-      extra: { "log.message": "job crashed", jobId: "j1" },
+      extra: { "log.message": "job crashed" },
     });
-    expect(event.extra.apiKey).toBe("[Redacted]");
+    expect(event.extra).toEqual({ "log.message": "job crashed" });
+    expect(event.tags["user.id"]).toBeUndefined();
+    expect(JSON.stringify(event)).not.toMatch(/apiKey|private message|sk-secret/);
     const values = event.exception.values;
     expect(values.map((value: { type: string }) => value.type)).toEqual(["TypeError", "Error"]);
     expect(values[1].stacktrace.frames.at(-1).filename).toContain("sentry.test.ts");
@@ -85,6 +92,8 @@ describe("sentry sink", () => {
       "service.name": "rakazo-api",
       "request.id": "Bearer abc.def",
       password: "hunter2",
+      runId: "x".repeat(201),
+      jobId: 123,
       error: {
         name: "Error",
         message: "token=sk-live-123456789",
@@ -95,9 +104,41 @@ describe("sentry sink", () => {
 
     const event = events[0]!;
     expect(event.extra["log.message"]).toBe("login failed for [Redacted]");
-    expect(event.extra.password).toBe("[Redacted]");
+    expect(event.extra).toEqual({ "log.message": "login failed for [Redacted]" });
+    expect(event.tags.runId).toBeUndefined();
+    expect(event.tags.jobId).toBeUndefined();
     expect(event.tags["request.id"]).toBe("Bearer [Redacted]");
     expect(JSON.stringify(event)).not.toMatch(/hunter2|sk-live|ada@example/);
+  });
+
+  it("scrubs SDK and scope metadata before sending", async () => {
+    const { events, transport } = recordingTransport();
+    const sink = createSentrySink({ dsn: DSN }, transport);
+    Sentry.withScope((scope) => {
+      scope.setUser({ id: "private-user", email: "private@example.com" });
+      scope.setExtra("content", "private content");
+      scope.setExtra("log.message", "token=sk-live-123456789");
+      scope.addEventProcessor((event) => ({
+        ...event,
+        server_name: "private-host",
+        request: { url: "https://example.com/?token=secret", headers: { cookie: "secret" } },
+        breadcrumbs: [{ category: "console", message: "private output" }],
+      }));
+      Sentry.captureException(new Error("unexpected failure"));
+    });
+    await sink.flush?.();
+    expect(events).toHaveLength(1);
+    const event = events[0]!;
+    expect(event.request).toBeUndefined();
+    expect(event.user).toBeUndefined();
+    expect(event.breadcrumbs).toBeUndefined();
+    expect(event.server_name).toBeUndefined();
+    expect(event.extra).toEqual({ "log.message": "token=[Redacted]" });
+    expect(JSON.stringify(event)).not.toMatch(/private-|private content|private output/);
+    const options = Sentry.getClient()!.getOptions();
+    expect(options.sampleRate).toBeUndefined();
+    expect(options.tracesSampleRate).toBeUndefined();
+    expect(options).not.toHaveProperty("profilesSampleRate");
   });
 
   it("reports error logs without an error as messages and ignores lower levels", async () => {

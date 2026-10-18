@@ -55,10 +55,29 @@ async function loadSentry(fetchImpl: typeof fetch): Promise<typeof SentryReact |
       // Sessions are not used by the collector, and console output can carry user content.
       integrations: (defaults) =>
         defaults.filter((integration) => integration.name !== "BrowserSession"),
-      beforeBreadcrumb: (breadcrumb) => (breadcrumb.category === "console" ? null : breadcrumb),
+      beforeBreadcrumb: (breadcrumb) => {
+        if (["console", "ui.click", "ui.input"].includes(breadcrumb.category ?? "")) return null;
+        if (["fetch", "xhr", "navigation"].includes(breadcrumb.category ?? "")) {
+          for (const key of ["url", "from", "to"]) {
+            const value = breadcrumb.data?.[key];
+            if (typeof value === "string") breadcrumb.data![key] = stripUrl(value);
+          }
+        }
+        return breadcrumb;
+      },
+      beforeSend: (event) => {
+        if (event.request) {
+          if (event.request.url) event.request.url = stripUrl(event.request.url);
+          delete event.request.headers;
+          delete event.request.cookies;
+          delete event.request.data;
+        }
+        delete event.user;
+        return event;
+      },
     });
-  } catch (error) {
-    console.warn("Browser error reporting failed to start", error);
+  } catch {
+    console.warn("Browser error reporting failed to start");
     return undefined;
   }
   return Sentry;
@@ -72,4 +91,8 @@ export function reportCaughtReactError(error: unknown, errorInfo: ErrorInfo): vo
   if (sentry) sentry.captureReactException(error, errorInfo);
   else if (pending && pending.length < MAX_PENDING) pending.push([error, errorInfo]);
   console.error(error);
+}
+
+function stripUrl(value: string): string {
+  return value.split(/[?#]/, 1)[0]!;
 }

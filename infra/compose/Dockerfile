@@ -32,28 +32,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store pnpm install --frozen-lo
 # leave the copied tree unreadable to USER node at runtime.
 COPY --chmod=755 . .
 RUN pnpm --filter @rakazo/db generate
-# Browser error reports are symbolicated by debug ID: hidden maps are uploaded when the build has
-# collector credentials, then removed so the image never serves them. Credentials and the collector
-# address arrive as build secrets, so neither lands in image history. BuildKit leaves secrets out of
-# the cache key, so a build that should upload passes a fresh SOURCEMAP_UPLOAD_ID to rerun this step.
-ARG SOURCEMAP_UPLOAD_ID
-RUN --mount=type=secret,id=sentry_auth_token,required=false \
-    --mount=type=secret,id=sentry_url,required=false \
-    --mount=type=secret,id=sentry_org,required=false \
-    --mount=type=secret,id=sentry_project,required=false \
-    set -e; \
-    RAKAZO_ALLOW_DEV_SECRETS=1 WEB_SOURCEMAPS=hidden pnpm --filter @rakazo/web build; \
-    cd apps/web; \
-    node_modules/.bin/sentry-cli sourcemaps inject dist >/dev/null; \
-    if [ -s /run/secrets/sentry_auth_token ]; then \
-      SENTRY_AUTH_TOKEN="$(cat /run/secrets/sentry_auth_token)" \
-      SENTRY_URL="$(cat /run/secrets/sentry_url)" \
-      SENTRY_ORG="$(cat /run/secrets/sentry_org)" \
-      SENTRY_PROJECT="$(cat /run/secrets/sentry_project)" \
-      node_modules/.bin/sentry-cli sourcemaps upload dist \
-        || echo "warning: source map upload failed; browser stack traces stay minified" >&2; \
-    fi; \
-    find dist -name '*.map' -delete
+RUN RAKAZO_ALLOW_DEV_SECRETS=1 pnpm --filter @rakazo/web build
 RUN install -d -m 750 -o node -g node /data /app/apps/web/node_modules/.vite-temp
 ARG GIT_SHA
 ENV NODE_ENV=production

@@ -90,6 +90,42 @@ describe("browser monitoring", () => {
     expect(options.beforeBreadcrumb({ category: "console", message: "x" })).toBeNull();
     expect(options.beforeBreadcrumb({ category: "fetch" })).toEqual({ category: "fetch" });
 
+    for (const category of ["ui.click", "ui.input"]) {
+      expect(options.beforeBreadcrumb({ category, message: "private text" })).toBeNull();
+    }
+    for (const category of ["fetch", "xhr", "navigation"]) {
+      expect(
+        options.beforeBreadcrumb({
+          category,
+          data: {
+            url: "https://example.com/path?token=secret#private",
+            from: "/before?query=secret",
+            to: "/after#private",
+            status_code: 500,
+          },
+        }),
+      ).toEqual({
+        category,
+        data: { url: "https://example.com/path", from: "/before", to: "/after", status_code: 500 },
+      });
+    }
+    expect(
+      options.beforeSend({
+        request: {
+          url: "https://example.com/path?token=secret#private",
+          headers: { authorization: "secret" },
+          cookies: "secret",
+          data: "private body",
+        },
+        user: { email: "private@example.com" },
+      }),
+    ).toEqual({ request: { url: "https://example.com/path" } });
+    expect(options.beforeSend({})).toEqual({});
+    expect(options.tracesSampleRate).toBeUndefined();
+    expect(options.profilesSampleRate).toBeUndefined();
+    expect(options.replaysSessionSampleRate).toBeUndefined();
+    expect(options.replaysOnErrorSampleRate).toBeUndefined();
+
     const error = new Error("boom");
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     reportCaughtReactError(error, { componentStack: "\n    at Thread" });
