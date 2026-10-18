@@ -73,6 +73,10 @@ async function loadSentry(fetchImpl: typeof fetch): Promise<typeof SentryReact |
           delete event.request.data;
         }
         delete event.user;
+        if (event.message) event.message = scrubText(event.message);
+        for (const value of event.exception?.values ?? []) {
+          if (value.value) value.value = scrubText(value.value);
+        }
         return event;
       },
     });
@@ -91,6 +95,14 @@ export function reportCaughtReactError(error: unknown, errorInfo: ErrorInfo): vo
   if (sentry) sentry.captureReactException(error, errorInfo);
   else if (pending && pending.length < MAX_PENDING) pending.push([error, errorInfo]);
   console.error(error);
+}
+
+const EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+const BEARER = /\bBearer\s+[^\s"',;&]+/gi;
+
+/** Error messages can quote user input; drop emails and bearer tokens before they leave. */
+function scrubText(value: string): string {
+  return value.replace(EMAIL, "[Redacted]").replace(BEARER, "Bearer [Redacted]");
 }
 
 function stripUrl(value: string): string {

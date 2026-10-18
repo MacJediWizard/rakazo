@@ -121,6 +121,15 @@ describe("browser monitoring", () => {
       }),
     ).toEqual({ request: { url: "https://example.com/path" } });
     expect(options.beforeSend({})).toEqual({});
+    expect(
+      options.beforeSend({
+        message: "Failed for someone@example.com",
+        exception: { values: [{ value: "401 Bearer abc.def from someone@example.com" }] },
+      }),
+    ).toEqual({
+      message: "Failed for [Redacted]",
+      exception: { values: [{ value: "401 Bearer [Redacted] from [Redacted]" }] },
+    });
     expect(options.tracesSampleRate).toBeUndefined();
     expect(options.profilesSampleRate).toBeUndefined();
     expect(options.replaysSessionSampleRate).toBeUndefined();
